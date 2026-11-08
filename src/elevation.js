@@ -14,7 +14,6 @@
 //   its parent plus its own bias (an average of the raw values around it, same rule).
 //   Squares near their parent's edge inherit an average of the parent values around them,
 //   so steps between parents become ramps (edge blending).
-// - (Unused for now) elevation(x, y) smoothly interpolates between grid-point averages.
 
 export const GRID = 1000; // miles
 
@@ -48,8 +47,8 @@ export function biasLevelsAt(d) {
 // parent's size). A square's value is what it inherits from its parent plus its own bias:
 // the average of the raw values around it, which have spread rawStd. Averaging shrinks the
 // spread to ~0.33x (narrow) or ~0.2x (wide), so biases are about ±0.29 * rawStd.
-// edgeRadius: with edge blending on, a square inherits the average parent value of the
-// squares up to edgeRadius away (interior squares are unaffected: all share one parent).
+// edgeRadius: a square inherits the average parent value of the squares up to edgeRadius
+// away (interior squares are unaffected: all their neighbours share one parent).
 // Finer levels are only computed when zoomed in far enough to see them.
 export const LEVELS = [
   { size: GRID },                               // 1,000 mi
@@ -87,7 +86,6 @@ export const parentOf = (L, a, b) => {
 // around them (radius 1); WIDE_FRACTION of squares, chosen at random per square, average
 // everything up to two squares out (radius 2).
 export const WIDE_FRACTION = 1 / 3;
-export const EDGE_BLEND = true; // default for the edge-blending setting
 
 /** Deterministic hash of (seed, i, j, k) -> [0, 1). */
 function hash(seed, i, j, k) {
@@ -107,9 +105,8 @@ function seedFromString(s) {
 /**
  * @param seedInput  seed (string or number)
  * @param options.wideFraction  share of squares using the wide blend (default WIDE_FRACTION)
- * @param options.edgeBlend     inherit an average of nearby parents at parent edges (default EDGE_BLEND)
  */
-export function createElevation(seedInput = 'dnd', { wideFraction = WIDE_FRACTION, edgeBlend = EDGE_BLEND } = {}) {
+export function createElevation(seedInput = 'dnd', { wideFraction = WIDE_FRACTION } = {}) {
   const seed = typeof seedInput === 'number' ? seedInput : seedFromString(String(seedInput));
   const avgCache = new Map();
 
@@ -171,17 +168,17 @@ export function createElevation(seedInput = 'dnd', { wideFraction = WIDE_FRACTIO
     return LEVELS[L].rawStd * normal(a, b, 200 + 10 * L);
   }
 
-  /** Bias of level-L square (a, b): weighted blend of the raw values around it. */
+  /** Bias of level-L square (a, b): plain average of the raw values around it. */
   function bias(L, a, b) {
     return blend(L, a, b, (x, y) => levelRaw(L, x, y));
   }
 
   /**
-   * What level-L square (a, b) inherits from the level above: its parent's value, or with
-   * edge blending, the average parent value of the squares up to edgeRadius around it.
+   * What level-L square (a, b) inherits from the level above: the average parent value of
+   * the squares up to edgeRadius around it (edge blending). For interior squares that's
+   * just their own parent's value; near a parent's edge it ramps toward the neighbour.
    */
   function inherited(L, a, b) {
-    if (!edgeBlend) return value(L - 1, ...parentOf(L, a, b));
     const r = LEVELS[L].edgeRadius;
     let v = 0;
     for (let db = -r; db <= r; db++) {
@@ -203,27 +200,10 @@ export function createElevation(seedInput = 'dnd', { wideFraction = WIDE_FRACTIO
     return v;
   }
 
-  /** Elevation in meters at (x, y) miles. */
-  function elevation(x, y) {
-    const gx = x / GRID, gy = y / GRID;
-    const i = Math.floor(gx), j = Math.floor(gy);
-    const tx = gx - i, ty = gy - j;
-    const row = [0, 0, 0, 0];
-    for (let r = 0; r < 4; r++) {
-      const jj = j - 1 + r;
-      row[r] = catmullRom(average(i - 1, jj), average(i, jj), average(i + 1, jj), average(i + 2, jj), tx);
-    }
-    return catmullRom(row[0], row[1], row[2], row[3], ty);
-  }
-
   /** Value of level-L square (a, b) if it's already computed, else undefined (no work done). */
   function peek(L, a, b) {
     return L === 0 ? avgCache.get(a + ',' + b) : valueCache.get(L + ':' + a + ',' + b);
   }
 
-  return { elevation, average, raw, levelRaw, biases, value, peek, inherited, bias, isWide, wideFraction, edgeBlend, seed };
-}
-
-function catmullRom(p0, p1, p2, p3, t) {
-  return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t);
+  return { average, raw, levelRaw, biases, value, peek, inherited, bias, isWide, wideFraction, seed };
 }

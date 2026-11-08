@@ -1,4 +1,5 @@
-// Minimal viewer: pan/zoom over the elevation squares, from 10,000 miles across to 1 mile.
+// Viewer: pan/zoom over the elevation squares, from 100,000 miles across down to the point
+// where 0.1-mile squares show. Hover shows elevation; clicking a square shows its details.
 
 import { createElevation, GRID, LEVELS, squareAt, squareCentre, parentOf, biasSize, biasLevelsAt } from './elevation.js';
 
@@ -13,31 +14,32 @@ let field = createElevation('dnd');
 
 // ---------- Settings menu ----------
 const wideRadios = [...document.querySelectorAll('input[name="wide"]')];
-const edgeRadios = [...document.querySelectorAll('input[name="edge"]')];
 const renderRadios = [...document.querySelectorAll('input[name="render"]')];
 const labelRadios = [...document.querySelectorAll('input[name="labels"]')];
-const settings = { wideFraction: field.wideFraction, edgeBlend: field.edgeBlend, smooth: true, labels: false };
+const settings = { wideFraction: field.wideFraction, smooth: true, labels: false };
 
-/** Rebuild the elevation field with changed settings; keep the view and any popup. */
+/** Apply changed settings; keep the view and any popup. */
 function applySettings(changes) {
+  const rebuild = 'wideFraction' in changes && changes.wideFraction !== field.wideFraction;
   Object.assign(settings, changes);
-  field = createElevation('dnd', { wideFraction: settings.wideFraction, edgeBlend: settings.edgeBlend });
+  if (rebuild) {
+    // Only the model's own settings need a new field (and new colours for every square).
+    field = createElevation('dnd', { wideFraction: settings.wideFraction });
+    tileCache = new Map();
+  }
   for (const r of renderRadios) r.checked = (r.value === 'smooth') === settings.smooth;
   for (const r of labelRadios) r.checked = (r.value === 'on') === settings.labels;
   for (const r of wideRadios) r.checked = Math.abs(Number(r.value) - settings.wideFraction) < 1e-6;
-  for (const r of edgeRadios) r.checked = (r.value === 'on') === settings.edgeBlend;
   if (selected) popup.innerHTML = popupHtml(selected.L, selected.a, selected.b), bindPopupClose();
   dirty = true;
 }
 for (const r of wideRadios) r.addEventListener('change', () => applySettings({ wideFraction: Number(r.value) }));
-for (const r of edgeRadios) r.addEventListener('change', () => applySettings({ edgeBlend: r.value === 'on' }));
 for (const r of renderRadios) r.addEventListener('change', () => applySettings({ smooth: r.value === 'smooth' }));
 for (const r of labelRadios) r.addEventListener('change', () => applySettings({ labels: r.value === 'on' }));
 
 /** Move to the next option in a radio group (wrapping). */
 const nextValue = (radios) => radios[(radios.findIndex((r) => r.checked) + 1) % radios.length].value;
 const toggleWide = () => applySettings({ wideFraction: Number(nextValue(wideRadios)) });
-const toggleEdge = () => applySettings({ edgeBlend: !settings.edgeBlend });
 const toggleSmooth = () => applySettings({ smooth: !settings.smooth });
 const toggleLabels = () => applySettings({ labels: !settings.labels });
 
@@ -84,9 +86,16 @@ function colour(e) {
   return STOPS[STOPS.length - 1][1];
 }
 
+// Precomputed colours every LUT_STEP metres, so drawing a square is a table lookup.
+const LUT_MIN = -8000, LUT_MAX = 8000, LUT_STEP = 5;
+const LUT = new Uint8ClampedArray(((LUT_MAX - LUT_MIN) / LUT_STEP + 1) * 3);
+for (let k = 0; k * LUT_STEP + LUT_MIN <= LUT_MAX; k++) LUT.set(colour(k * LUT_STEP + LUT_MIN), k * 3);
+/** Index into LUT for elevation e. */
+const lutIndex = (e) => 3 * Math.round((Math.min(LUT_MAX, Math.max(LUT_MIN, e)) - LUT_MIN) / LUT_STEP);
+
 // ---------- Drawing ----------
-// Squares at every level (see LEVELS) are drawn flat; the finest level is what's coloured.
-// Level-0 square (i, j) is the 1,000-mile square centred on grid point (i, j).
+// One level of squares (see LEVELS) is shown at a time: the finest that's big enough on
+// screen. Level-0 square (i, j) is the 1,000-mile square centred on grid point (i, j).
 const FINEST = LEVELS.length - 1;
 const MIN_SQUARE_PX = 8; // smallest on-screen size at which a level is drawn
 
@@ -103,51 +112,76 @@ const squareOf = (x, y) => squareAt(0, x, y);
 /** Fully zoomed in: the point where the finest (0.1-mile) squares become the level shown. */
 const minView = () => (LEVELS[FINEST].size / MIN_SQUARE_PX) * cssW;
 
-// Smooth rendering: one pixel per square in a small off-screen image, which the browser
-// stretches over the screen with smooth (bilinear) blending — colours fade from each
-// square's centre to its neighbours'. Still one value per square, not per screen pixel.
+// ---------- Rendering the shown level ----------
+// Squares are coloured into an off-screen image with one pixel per square, which is then
+// stretched over the screen: with smooth blending (colours fade between square centres) or
+// without (flat blocks). Still one value per square, not per screen pixel.
+//
+// Squares are kept in tiles of TILE x TILE, each holding its squares' colours, so a frame
+// mostly just copies tile rows. New squares are computed a little at a time: each frame
+// spends at most FRAME_BUDGET_MS, on the tiles nearest the centre of the screen first.
+// Until a square is computed it shows its nearest computed coarser level (or grey), so
+// zooming into a new level starts coarse and sharpens from the centre outward.
+const TILE = 16;
+const FRAME_BUDGET_MS = 6;
+const TILE_CACHE_MAX = 6000;
+let tileCache = new Map(); // "D:ta,tb" -> tile
+let pendingSquares = 0;    // squares still to compute for the current view
+const progress = document.getElementById('progress');
 const off = document.createElement('canvas');
 const offCtx = off.getContext('2d');
+let offImg = null;
 
-// ---------- Staggered rendering ----------
-// Computing a square the first time can be slow (it pulls in its parents and neighbours),
-// so each frame only spends FRAME_BUDGET_MS computing new squares, centre of the screen
-// first. Squares not computed yet are drawn with their nearest computed coarser level (or
-// a neutral placeholder), and the frame after continues where this one stopped.
-const FRAME_BUDGET_MS = 10;
-const PLACEHOLDER = [128, 128, 128];
-let pendingSquares = 0; // squares still to compute for the current view
-const progress = document.getElementById('progress');
-
-/** Compute missing level-D squares in [a0..a1] x [b0..b1], centre-out, within the budget. */
-function computeWithinBudget(D, a0, b0, a1, b1) {
-  const missing = [];
-  for (let b = b0; b <= b1; b++) {
-    for (let a = a0; a <= a1; a++) if (field.peek(D, a, b) === undefined) missing.push([a, b]);
-  }
-  if (!missing.length) { pendingSquares = 0; return; }
-  const ca = (a0 + a1) / 2, cb = (b0 + b1) / 2;
-  missing.sort((p, q) => ((p[0] - ca) ** 2 + (p[1] - cb) ** 2) - ((q[0] - ca) ** 2 + (q[1] - cb) ** 2));
-  const deadline = performance.now() + FRAME_BUDGET_MS;
-  let k = 0;
-  for (; k < missing.length; k++) {
-    if ((k & 15) === 0 && performance.now() > deadline) break; // check the clock every 16
-    field.value(D, missing[k][0], missing[k][1]);
-  }
-  pendingSquares = missing.length - k;
+/** Write the colour for elevation v (or grey if unknown) into rgba at pixel p. */
+function putColour(rgba, p, v) {
+  if (v === undefined) { rgba[p] = rgba[p + 1] = rgba[p + 2] = 128; }
+  else { const k = lutIndex(v); rgba[p] = LUT[k]; rgba[p + 1] = LUT[k + 1]; rgba[p + 2] = LUT[k + 2]; }
+  rgba[p + 3] = 255;
 }
 
-/** Colour for a square: its value if computed, else the nearest computed coarser level. */
-function squareColour(D, a, b) {
+/** Nearest already-computed value for level-D square (a, b): itself, else its ancestors. */
+function nearestKnown(D, a, b) {
   let v = field.peek(D, a, b);
   for (let L = D; v === undefined && L > 0; L--) {
     [a, b] = parentOf(L, a, b);
     v = field.peek(L - 1, a, b);
   }
-  return v === undefined ? PLACEHOLDER : colour(v);
+  return v;
 }
 
-function drawSmooth(D) {
+/** The tile of level D at tile index (ta, tb), created (with fallback colours) if needed. */
+function getTile(D, ta, tb) {
+  const key = D + ':' + ta + ',' + tb;
+  let t = tileCache.get(key);
+  if (t) return t;
+  t = { D, ta, tb, rgba: new Uint8ClampedArray(TILE * TILE * 4), done: new Uint8Array(TILE * TILE), left: TILE * TILE, next: 0 };
+  for (let j = 0; j < TILE; j++) {
+    for (let i = 0; i < TILE; i++) {
+      const a = ta * TILE + i, b = tb * TILE + j, q = j * TILE + i;
+      const exact = field.peek(D, a, b);
+      if (exact !== undefined) { t.done[q] = 1; t.left--; }
+      putColour(t.rgba, q * 4, exact !== undefined ? exact : nearestKnown(D, a, b));
+    }
+  }
+  tileCache.set(key, t);
+  if (tileCache.size > TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
+  return t;
+}
+
+/** Compute the tile's remaining squares in order until the deadline. */
+function advanceTile(t, deadline) {
+  while (t.left > 0) {
+    if (performance.now() > deadline) return;
+    while (t.done[t.next]) t.next++;
+    const q = t.next, a = t.ta * TILE + (q % TILE), b = t.tb * TILE + Math.floor(q / TILE);
+    putColour(t.rgba, q * 4, field.value(t.D, a, b));
+    t.done[q] = 1;
+    t.left--;
+  }
+}
+
+/** Draw level D over the screen (smooth or blocky), computing new squares within budget. */
+function drawLevel(D, smooth) {
   const S = LEVELS[D].size;
   const [wx0, wy0] = toWorld(0, 0);
   const [wx1, wy1] = toWorld(cssW, cssH);
@@ -155,22 +189,46 @@ function drawSmooth(D) {
   const [a0, b0] = squareAt(D, wx0, wy0).map((v) => v - 1);
   const [a1, b1] = squareAt(D, wx1, wy1).map((v) => v + 1);
   const w = a1 - a0 + 1, h = b1 - b0 + 1;
-  off.width = w;
-  off.height = h;
-  const img = offCtx.createImageData(w, h);
-  computeWithinBudget(D, a0, b0, a1, b1);
-  for (let b = b0; b <= b1; b++) {
-    for (let a = a0; a <= a1; a++) {
-      const c = squareColour(D, a, b);
-      const o = ((b - b0) * w + (a - a0)) * 4;
-      img.data[o] = c[0]; img.data[o + 1] = c[1]; img.data[o + 2] = c[2]; img.data[o + 3] = 255;
+
+  // Tiles covering the view, nearest the centre first.
+  const ca = (a0 + a1) / 2 / TILE, cb = (b0 + b1) / 2 / TILE;
+  const tiles = [];
+  for (let tb = Math.floor(b0 / TILE); tb <= Math.floor(b1 / TILE); tb++) {
+    for (let ta = Math.floor(a0 / TILE); ta <= Math.floor(a1 / TILE); ta++) {
+      const t = getTile(D, ta, tb);
+      t.dist = (ta + 0.5 - ca) ** 2 + (tb + 0.5 - cb) ** 2;
+      tiles.push(t);
     }
   }
-  offCtx.putImageData(img, 0, 0);
+  tiles.sort((p, q) => p.dist - q.dist);
+  const deadline = performance.now() + FRAME_BUDGET_MS;
+  pendingSquares = 0;
+  for (const t of tiles) {
+    if (t.left) advanceTile(t, deadline); // stops early once the frame's budget is spent
+    pendingSquares += t.left;
+  }
+
+  // Assemble the visible part of each tile into one image (one pixel per square).
+  if (off.width !== w || off.height !== h || !offImg) {
+    off.width = w; off.height = h;
+    offImg = offCtx.createImageData(w, h);
+  }
+  const data = offImg.data;
+  for (const t of tiles) {
+    const ia = Math.max(a0, t.ta * TILE), ib = Math.min(a1, t.ta * TILE + TILE - 1);
+    const ja = Math.max(b0, t.tb * TILE), jb = Math.min(b1, t.tb * TILE + TILE - 1);
+    const len = (ib - ia + 1) * 4;
+    for (let b = ja; b <= jb; b++) {
+      const src = ((b - t.tb * TILE) * TILE + (ia - t.ta * TILE)) * 4;
+      data.set(t.rgba.subarray(src, src + len), ((b - b0) * w + (ia - a0)) * 4);
+    }
+  }
+  offCtx.putImageData(offImg, 0, 0);
+
   // Pixel k covers square a0 + k exactly, so pixel centres land on square centres.
   const [x0, y0] = toScreen(a0 * S - GRID / 2, b0 * S - GRID / 2);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
+  ctx.imageSmoothingEnabled = smooth;
+  ctx.imageSmoothingQuality = 'low'; // plain bilinear: same look when enlarging, much cheaper
   ctx.drawImage(off, x0, y0, w * S / milesPerPx(), h * S / milesPerPx());
 }
 
@@ -186,18 +244,7 @@ function draw() {
 
   // 1. Squares of the level being shown, one colour per square.
   const D = visibleLevel();
-  if (settings.smooth) drawSmooth(D);
-  else {
-    const [a0, b0, a1, b1] = range(D);
-    computeWithinBudget(D, a0, b0, a1, b1);
-    for (let b = b0; b <= b1; b++) {
-      for (let a = a0; a <= a1; a++) {
-        const c = squareColour(D, a, b);
-        ctx.fillStyle = `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
-        ctx.fillRect(edgeX(D, a), edgeY(D, b), edgeX(D, a + 1) - edgeX(D, a), edgeY(D, b + 1) - edgeY(D, b));
-      }
-    }
-  }
+  drawLevel(D, settings.smooth);
 
   // 2. Square edges, finest first; coarser levels darker. Skipped when too small to see.
   //    In smooth mode the shown level's own edges are left out.
@@ -211,7 +258,6 @@ function draw() {
     for (let b = b0; b <= b1 + 1; b++) { ctx.moveTo(0, edgeY(L, b) + 0.5); ctx.lineTo(cssW, edgeY(L, b) + 0.5); }
     ctx.stroke();
   }
-  const [i0, j0, i1, j1] = range(0);
 
   // 3. Bias-square boundaries (10,000 mi and up), on the same half-way lines as square
   //    edges: bias square a holds grid points a*n ... a*n + n - 1 (n = size / GRID).
@@ -359,7 +405,6 @@ const keys = new Set();
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closePopup(); return; }
   if (e.key === 't' || e.key === 'T') { toggleWide(); return; }
-  if (e.key === 'e' || e.key === 'E') { toggleEdge(); return; }
   if (e.key === 'r' || e.key === 'R') { toggleSmooth(); return; }
   if (e.key === 'l' || e.key === 'L') { toggleLabels(); return; }
   if (e.key === '+' || e.key === '=') zoomAt(1 / 1.5, cssW / 2, cssH / 2);
@@ -372,7 +417,6 @@ window.addEventListener('blur', () => keys.clear());
 
 // ---------- Square details popup ----------
 let selected = null; // { L, a, b } of the clicked square
-
 
 function selectAt(sx, sy) {
   const L = visibleLevel(); // click selects a square of the level being shown
@@ -425,7 +469,8 @@ function popupHtml(L, a, b) {
       row(name, metres(field.average(x, y)), 'sep');
       row('raw value', metres(field.raw(x, y)), 'muted');
     } else {
-      // Inherited: the parent's value, or with edge blending the average of nearby parents.
+      // Inherited: the average of nearby parents' values (edge blending); for interior
+      // squares that's just their own parent's value.
       const inh = field.inherited(l, x, y), parentV = field.value(l - 1, ...parentOf(l, x, y));
       const blended = Math.abs(inh - parentV) > 0.5;
       row(name, metres(field.value(l, x, y)), 'sep');

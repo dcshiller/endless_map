@@ -17,7 +17,7 @@ Run: `./run.sh` (serves the folder and opens the browser).
 - **Edge blending**: squares near their parent's edge inherit the average of nearby
   parents' values, so steps between parents become ramps.
 
-Settings are in `LEVELS`, `RAW_MEAN`/`RAW_STD`, `BIAS_*`, `WIDE_FRACTION` and `EDGE_BLEND`.
+Settings are in `LEVELS`, `RAW_MEAN`/`RAW_STD`, `BIAS_*` and `WIDE_FRACTION`.
 
 ## Viewer (`src/main.js`)
 
@@ -28,6 +28,6 @@ Settings are in `LEVELS`, `RAW_MEAN`/`RAW_STD`, `BIAS_*`, `WIDE_FRACTION` and `E
 - Hover: elevation of the square under the cursor. On-map elevation labels are hidden by
   default (**L** shows them).
 - Click a square: popup with its full breakdown (Esc closes).
-- Settings menu (top right): wide smoothing none / 1/3 (**T**), edge blending off / on (**E**).
+- Settings menu (top right): wide smoothing none / 1/3 (**T**).
 
 The earlier, more elaborate version is preserved in `v1/` (it runs on its own: `v1/run.sh`).
