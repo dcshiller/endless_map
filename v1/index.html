@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Atlas</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #26405c; }
+    canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+    canvas.dragging { cursor: grabbing; }
+    .panel {
+      position: fixed; left: 12px; bottom: 12px; padding: 8px 12px;
+      font: 13px/1.5 Georgia, 'Times New Roman', serif; color: #2d241a;
+      background: rgba(244, 236, 214, 0.92); border: 1px solid #8a7656; border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); min-width: 220px;
+      font-variant-numeric: tabular-nums;
+    }
+    .panel input {
+      font: inherit; width: 110px; background: #fffaf0; border: 1px solid #8a7656;
+      border-radius: 3px; padding: 1px 4px; color: inherit;
+    }
+    .help { color: #6b5b43; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <canvas id="map"></canvas>
+  <div class="panel">
+    <div>Seed <input id="seed" spellcheck="false" /></div>
+    <div id="readout">&nbsp;</div>
+    <div class="help">Drag / arrows / WASD to pan · wheel or +/− to zoom · L: mountain lines</div>
+  </div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

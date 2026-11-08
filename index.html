@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Map</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #1d3b5c; }
+    canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+    .panel {
+      position: fixed; left: 12px; bottom: 12px; padding: 6px 10px;
+      font: 13px/1.5 system-ui, sans-serif; color: #111;
+      background: rgba(255, 255, 255, 0.85); border-radius: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    #hover {
+      position: fixed; pointer-events: none; display: none; padding: 2px 6px;
+      font: 13px/1.4 system-ui, sans-serif; color: #fff; background: rgba(0, 0, 0, 0.75);
+      border-radius: 3px; white-space: nowrap; font-variant-numeric: tabular-nums;
+    }
+    #popup {
+      position: fixed; display: none; min-width: 260px; max-width: 380px; padding: 10px 12px;
+      max-height: calc(100vh - 16px); overflow-y: auto;
+      font: 13px/1.5 system-ui, sans-serif; color: #111; background: #fff;
+      border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+      font-variant-numeric: tabular-nums;
+    }
+    #popup h3 { margin: 0 24px 6px 0; font-size: 14px; }
+    #popup table { border-collapse: collapse; width: 100%; }
+    #popup td { padding: 1px 0; vertical-align: top; }
+    #popup td:last-child { text-align: right; padding-left: 12px; white-space: nowrap; }
+    #popup .sep td { border-top: 1px solid #ddd; padding-top: 4px; }
+    #popup .muted { color: #666; }
+    #popup .close {
+      position: absolute; top: 4px; right: 6px; border: 0; background: none;
+      font-size: 18px; line-height: 1; cursor: pointer; color: #666;
+    }
+    #settings {
+      position: fixed; top: 12px; right: 12px; padding: 6px 10px;
+      font: 13px/1.6 system-ui, sans-serif; color: #111;
+      background: rgba(255, 255, 255, 0.9); border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    }
+    #settings summary { cursor: pointer; font-weight: 600; }
+    #settings fieldset { border: 0; margin: 4px 0 0; padding: 0; }
+    #settings legend { padding: 0; color: #444; }
+    #settings label { display: block; cursor: pointer; }
+    #settings .hint { color: #666; font-size: 12px; }
+    #progress {
+      position: fixed; top: 12px; left: 12px; display: none; padding: 3px 8px;
+      font: 12px/1.5 system-ui, sans-serif; color: #fff; background: rgba(0, 0, 0, 0.6);
+      border-radius: 3px; font-variant-numeric: tabular-nums;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="map"></canvas>
+  <div id="hover"></div>
+  <div id="progress"></div>
+  <div id="popup"></div>
+  <details id="settings" open>
+    <summary>Settings</summary>
+    <fieldset>
+      <legend>Wide smoothing (blend 2 squares out)</legend>
+      <label><input type="radio" name="wide" value="0" /> None</label>
+      <label><input type="radio" name="wide" value="0.3333333333" /> 1/3 of squares</label>
+    </fieldset>
+    <fieldset>
+      <legend>Edge blending (ramp between parent squares)</legend>
+      <label><input type="radio" name="edge" value="off" /> Off</label>
+      <label><input type="radio" name="edge" value="on" /> On</label>
+    </fieldset>
+    <fieldset>
+      <legend>Rendering</legend>
+      <label><input type="radio" name="render" value="smooth" /> Smooth (blend between squares)</label>
+      <label><input type="radio" name="render" value="blocky" /> Blocky (flat squares)</label>
+    </fieldset>
+    <fieldset>
+      <legend>Elevation labels on map</legend>
+      <label><input type="radio" name="labels" value="off" /> Hidden</label>
+      <label><input type="radio" name="labels" value="on" /> Shown</label>
+    </fieldset>
+    <div class="hint">T wide smoothing · E edge blending · R rendering · L labels</div>
+  </details>
+  <div class="panel">
+    <div id="readout">&nbsp;</div>
+    <div>Drag / arrows / WASD to pan · wheel or +/− to zoom · click a square for details</div>
+  </div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
