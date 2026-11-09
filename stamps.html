@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mountain Stamps</title>
+<style>
+  body { margin: 0; padding: 16px; background: #f4efe4; color: #3b2a1a; font: 14px/1.4 system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 24px 0 8px; }
+  p { margin: 0 0 8px; color: #6b5640; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+  .cell { background: #e2cda5; border-radius: 6px; padding: 6px 6px 2px; text-align: center; }
+  .cell svg { width: 100%; height: 80px; }
+  .cell span { font-size: 11px; color: #6b5640; }
+  .chain { width: 100%; max-width: 1200px; background: #e2cda5; border-radius: 6px; display: block; }
+  button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid #b59a72; background: #fffaf0; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>Mountain stamps</h1>
+<p>Generated from a seed in <code>src/mountains.js</code>. Each stamp is filled, so nearer ones hide farther ones.</p>
+<button id="reseed">New seed</button> <span id="seedLabel"></span>
+
+<h2>Sample chains</h2>
+<svg class="chain" id="chain" viewBox="0 0 1200 520"></svg>
+
+<h2>All stamps</h2>
+<div class="grid" id="grid"></div>
+
+<script type="module">
+import { makeStamps, stampGroup, stampSvg } from './src/mountains.js';
+import { hash } from './src/random.js';
+
+let seed = 1;
+
+function render() {
+  document.getElementById('seedLabel').textContent = `seed ${seed}`;
+  const stamps = makeStamps(seed, 48);
+  document.getElementById('grid').innerHTML = stamps
+    .map((s) => `<div class="cell">${stampSvg(s)}<span>${s.kind} #${s.id}</span></div>`).join('');
+
+  // Pools by size: big near a chain's spine, small toward its edges.
+  const big = stamps.filter((s) => ['peak', 'crag', 'twin', 'range'].includes(s.kind));
+  const mid = stamps.filter((s) => ['broad', 'twin', 'peak'].includes(s.kind));
+  const small = stamps.filter((s) => ['hill', 'foothills', 'broad'].includes(s.kind));
+  const rnd = (k) => hash(seed, k, 7, 950);
+
+  const placed = [];
+  // Two chains: a long winding one and a short, tight one.
+  const chains = [
+    { x0: 60, x1: 1140, y: (x) => 170 + 70 * Math.sin(x / 190) + 30 * Math.sin(x / 67), width: 70, step: 22 },
+    { x0: 150, x1: 700, y: (x) => 420 - 0.12 * (x - 150) + 25 * Math.sin(x / 90), width: 45, step: 26 },
+  ];
+  let k = 0;
+  for (const c of chains) {
+    for (let x = c.x0; x <= c.x1; x += c.step * (0.7 + 0.6 * rnd(k++))) {
+      // A few stamps across the chain at this point, spread around its spine.
+      const across = 1 + Math.floor(rnd(k++) * 3);
+      for (let a = 0; a < across; a++) {
+        const off = (rnd(k++) - 0.5) * 2;            // -1..1 across the chain
+        const edge = Math.abs(off);
+        const ends = Math.min(x - c.x0, c.x1 - x) / 120; // taper toward the chain's ends
+        const pool = edge < 0.35 && ends > 0.6 ? big : edge < 0.7 && ends > 0.25 ? mid : small;
+        const s = pool[Math.floor(rnd(k++) * pool.length)];
+        const size = (pool === big ? 62 : pool === mid ? 48 : 34) * (0.8 + 0.4 * rnd(k++));
+        placed.push({ s, x: x + (rnd(k++) - 0.5) * 14, y: c.y(x) + off * c.width, size });
+      }
+    }
+  }
+  // Back to front: higher on the page (farther away) first.
+  placed.sort((p, q) => p.y - q.y);
+  document.getElementById('chain').innerHTML = placed.map(({ s, x, y, size }) => {
+    const sc = size / 100;
+    // Anchor = bottom centre (50, 100). Never mirrored: the light always comes from the left.
+    return `<g transform="translate(${(x - 50 * sc).toFixed(1)} ${(y - 100 * sc).toFixed(1)}) scale(${sc.toFixed(3)})">${stampGroup(s)}</g>`;
+  }).join('');
+}
+
+document.getElementById('reseed').addEventListener('click', () => { seed++; render(); });
+render();
+</script>
+</body>
+</html>
