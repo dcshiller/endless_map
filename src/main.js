@@ -7,6 +7,8 @@ import { HOTSPOT_CELL, CHAIN_REACH } from './hotspots.js';
 import { POLE_DISTANCE, CELL_SIZE, MAX_CELL_RADIUS } from './climate.js';
 import { reliefStampsByKind, reliefKindFor, reliefColours, RELIEF_STYLE } from './mountains.js';
 import { colour } from './colour.js';
+import { RAIN_LEVEL, RAIN_RANGE } from './rain.js';
+import { createRivers, SOURCE_LEVEL, FLOW_LEVEL, RIVER_CLASSES } from './rivers.js';
 import { hash } from './random.js';
 
 const MAX_VIEW = 100000; // miles across the screen, fully zoomed out
@@ -27,7 +29,8 @@ const plateRadios = [...document.querySelectorAll('input[name="plates"]')];
 const viewRadios = [...document.querySelectorAll('input[name="view"]')];
 const windRadios = [...document.querySelectorAll('input[name="wind"]')];
 const mountainRadios = [...document.querySelectorAll('input[name="mountains"]')];
-const settings = { wideFraction: field.wideFraction, smooth: true, labels: false, plates: false, view: 'elevation', wind: false, mountains: true };
+const riverRadios = [...document.querySelectorAll('input[name="rivers"]')];
+const settings = { wideFraction: field.wideFraction, smooth: true, labels: false, plates: false, view: 'elevation', wind: false, mountains: true, rivers: true };
 
 /** Apply changed settings; keep the view and any popup. */
 function applySettings(changes) {
@@ -38,6 +41,10 @@ function applySettings(changes) {
     field = createElevation(SEED, { wideFraction: settings.wideFraction });
     tileCache = new Map();
     stampTiles.clear();
+    rainTiles.clear();
+    riverTiles.clear();
+    lakeSquares = new Set();
+    riverLocal = null;
     workTiles = []; // old tiles; the next draw lists the new ones
     configureWorkers();
   }
@@ -47,6 +54,7 @@ function applySettings(changes) {
   for (const r of viewRadios) r.checked = r.value === settings.view;
   for (const r of windRadios) r.checked = (r.value === 'on') === settings.wind;
   for (const r of mountainRadios) r.checked = (r.value === 'on') === settings.mountains;
+  for (const r of riverRadios) r.checked = (r.value === 'on') === settings.rivers;
   for (const r of wideRadios) r.checked = Math.abs(Number(r.value) - settings.wideFraction) < 1e-6;
   if (selected) popup.innerHTML = popupHtml(selected.L, selected.a, selected.b), bindPopupClose();
   dirty = true;
@@ -58,6 +66,7 @@ for (const r of plateRadios) r.addEventListener('change', () => applySettings({ 
 for (const r of viewRadios) r.addEventListener('change', () => applySettings({ view: r.value }));
 for (const r of windRadios) r.addEventListener('change', () => applySettings({ wind: r.value === 'on' }));
 for (const r of mountainRadios) r.addEventListener('change', () => applySettings({ mountains: r.value === 'on' }));
+for (const r of riverRadios) r.addEventListener('change', () => applySettings({ rivers: r.value === 'on' }));
 
 /** Move to the next option in a radio group (wrapping). */
 const nextValue = (radios) => radios[(radios.findIndex((r) => r.checked) + 1) % radios.length].value;
@@ -65,9 +74,10 @@ const toggleWide = () => applySettings({ wideFraction: Number(nextValue(wideRadi
 const toggleSmooth = () => applySettings({ smooth: !settings.smooth });
 const toggleLabels = () => applySettings({ labels: !settings.labels });
 const togglePlates = () => applySettings({ plates: !settings.plates });
-const toggleView = () => applySettings({ view: settings.view === 'plates' ? 'elevation' : 'plates' });
+const toggleView = () => applySettings({ view: nextValue(viewRadios) });
 const toggleWind = () => applySettings({ wind: !settings.wind });
 const toggleMountains = () => applySettings({ mountains: !settings.mountains });
+const toggleRivers = () => applySettings({ rivers: !settings.rivers });
 
 const view = { cx: 0, cy: 0, width: 6000 }; // centre (miles) and miles across the screen
 let cssW = 0, cssH = 0, dpr = 1;
@@ -242,6 +252,15 @@ function configureWorkers() {
 function onTiles(w, msg) {
   if (msg.gen !== gen) return; // from before a settings change
   w.busy--;
+  if (msg.type === 'rivers') {
+    inFlight.delete('R:' + msg.ta + ',' + msg.tb);
+    riverTiles.set(msg.ta + ',' + msg.tb, msg.rivers);
+    riverLayoutStale = true;
+    if (riverTiles.size > 4000) riverTiles.delete(riverTiles.keys().next().value);
+    dirty = true;
+    pump();
+    return;
+  }
   for (const t of msg.tiles) {
     field.importTile(t.L, t.ta, t.tb, { core: t.core, value: t.value });
     const key = t.L + ':' + t.ta + ',' + t.tb;
@@ -260,14 +279,14 @@ function onTiles(w, msg) {
 /** Hand the view's missing tiles (then those the stamps need) to idle workers, nearest the centre first. */
 function pump() {
   if (!workers.length) { scheduleWork(); return; }
-  for (const t of [...workTiles, ...stampNeeds]) {
+  for (const t of [...workTiles, ...stampNeeds, ...rainNeeds, ...riverNeeds]) {
     if (!t.left || inFlight.has(t.key)) continue;
     let w = workers[0];
     for (const x of workers) if (x.busy < w.busy) w = x;
     if (w.busy >= IN_FLIGHT_PER_WORKER) return;
     w.busy++;
     inFlight.add(t.key);
-    w.postMessage({ type: 'tile', L: t.D, ta: t.ta, tb: t.tb, gen });
+    w.postMessage(t.rivers ? { type: 'rivers', ta: t.ta, tb: t.tb, gen } : { type: 'tile', L: t.D, ta: t.ta, tb: t.tb, gen });
   }
 }
 
@@ -330,6 +349,12 @@ function drawLevel(D, smooth) {
   workTiles = tiles; // the workers work through these, nearest first
   if (fallbackStale) { fallbackStale = false; refreshFallbacks(tiles); }
   if (pendingSquares) pump();
+
+  // Land a little greener where it's wet (see tintTile), once a tile's colours are final.
+  if (D >= RAIN_LEVEL && settings.view === 'elevation') {
+    for (const t of tiles) if (!t.left && !t.tinted) tintTile(t);
+    if (rainNeeds.length) pump();
+  }
 
   // Assemble the visible part of each tile into one image (one pixel per square).
   if (off.width !== w || off.height !== h || !offImg) {
@@ -405,6 +430,7 @@ function drawMountains() {
   for (let tb = Math.floor(b0 / TILE); tb <= Math.floor(b1 / TILE); tb++) {
     for (let ta = Math.floor(a0 / TILE); ta <= Math.floor(a1 / TILE); ta++) {
       for (const c of stampsInTile(ta, tb)) {
+        if (settings.rivers && onLake(c)) continue; // no stamps on lakes
         const size = c.miles * pxPerMile;
         if (size > STAMP_FADE_PX[1]) continue;
         const [sx, sy] = toScreen(c.x, c.y);
@@ -429,6 +455,14 @@ function drawMountains() {
     }
   }
   ctx.globalAlpha = 1;
+}
+
+/** Is stamp c's square, or the square under its base, part of a lake? */
+function onLake(c) {
+  if (!lakeSquares.size) return false;
+  if (lakeSquares.has(c.a + ',' + c.b)) return true;
+  const [i, j] = squareAt(STAMP_LEVEL, c.x, c.y);
+  return lakeSquares.has(i + ',' + j);
 }
 
 // Stamp candidates per tile of stamp-level squares, decided once (when the tile and its
@@ -488,6 +522,7 @@ function stampsInTile(ta, tb) {
       for (let k = 0; k < n; k++) {
         const ch = 10 * k; // separate hash channels for the second stamp
         list.push({
+          a, b,
           st: pool[(v0 + k * (1 + Math.floor(hash(seed, a, b, 967) * (pool.length - 1)))) % pool.length],
           x: cx + (hash(seed, a, b, 963 + ch) - 0.5) * 0.6 * S,
           y: cy + (hash(seed, a, b, 964 + ch) - 0.5) * 0.6 * S + 0.2 * S,
@@ -588,10 +623,17 @@ function draw() {
   const pxOf = (L) => edgeX(L, 1) - edgeX(L, 0);
   const range = (L) => [...squareAt(L, wx0, wy0), ...squareAt(L, wx1, wy1)]; // a0, b0, a1, b1
 
+  rainNeeds = [];
+  riverNeeds = [];
+  rainDeadline = performance.now() + RAIN_SLICE_MS;
   if (settings.view === 'plates') {
     // Plates view: continents and hotspots only, no elevation.
     pendingSquares = 0;
     drawPlatesView(wx0, wy0, wx1, wy1);
+  } else if (settings.view === 'rain' && view.width <= RAIN_MAX_VIEW) {
+    // Rainfall view: yearly rain per 100-mile square.
+    drawRainView(wx0, wy0, wx1, wy1);
+    if (settings.rivers) drawRivers(wx0, wy0, wx1, wy1);
   } else {
     // 1. Squares of the level being shown, one colour per square.
     const D = visibleLevel();
@@ -610,7 +652,8 @@ function draw() {
       ctx.stroke();
     }
 
-    // Mountain stamps on high ground.
+    // Rivers, then mountain stamps on high ground (over them).
+    if (settings.rivers) drawRivers(wx0, wy0, wx1, wy1);
     if (settings.mountains) drawMountains();
 
     // 3. Bias-square boundaries (10,000 mi and up), on the same half-way lines as square
@@ -809,6 +852,334 @@ function drawWind(wx0, wy0, wx1, wy1) {
   }
 }
 
+// ---------- Rainfall view ----------
+// Yearly rainfall (rain.js) per 100-mile square, from dry tan through greens to blue; sea in
+// plain dark blue. A tile of squares is worked out once the elevation tiles its wind traces
+// can reach (those within RAIN_RANGE of it) are computed; missing ones are fetched from the
+// workers. Zoomed out beyond
+// RAIN_MAX_VIEW the elevation view is shown instead (too many squares).
+const RAIN_MAX_VIEW = 20000; // miles across the screen
+const RAIN_STOPS = [
+  [0, [222, 204, 160]],
+  [150, [214, 196, 120]],
+  [400, [178, 188, 98]],
+  [800, [112, 164, 82]],
+  [1500, [52, 128, 74]],
+  [2500, [26, 96, 96]],
+  [4000, [24, 64, 120]],
+];
+const RAIN_SEA = [58, 78, 104];
+const rainTiles = new Map(); // "ta,tb" -> { canvas, mm }
+let rainDeadline = 0;        // working out rain tiles stops for the frame after this time
+const RAIN_SLICE_MS = 8;
+let rainNeeds = [];          // elevation tiles the rain view is waiting for (see pump)
+
+function rainColour(mm) {
+  if (mm <= RAIN_STOPS[0][0]) return RAIN_STOPS[0][1];
+  for (let k = 0; k < RAIN_STOPS.length - 1; k++) {
+    const [m0, c0] = RAIN_STOPS[k], [m1, c1] = RAIN_STOPS[k + 1];
+    if (mm <= m1) {
+      const t = (mm - m0) / (m1 - m0);
+      return c0.map((v, i) => v + (c1[i] - v) * t);
+    }
+  }
+  return RAIN_STOPS[RAIN_STOPS.length - 1][1];
+}
+
+/** Rain tile (ta, tb) of the rain squares, or null while elevation tiles are pending. */
+function rainTile(ta, tb) {
+  const key = ta + ',' + tb;
+  let t = rainTiles.get(key);
+  if (t) return t;
+  const L = RAIN_LEVEL;
+  const n = Math.ceil(RAIN_RANGE / (TILE * LEVELS[L].size)); // tiles a trace can reach, each way
+  let ready = true;
+  for (let db = -n; db <= n; db++) for (let da = -n; da <= n; da++) {
+    if (field.hasTile(L, ta + da, tb + db)) continue;
+    ready = false;
+    if (workers.length) rainNeeds.push({ D: L, ta: ta + da, tb: tb + db, key: L + ':' + (ta + da) + ',' + (tb + db), left: 1 });
+    else field.tile(L, ta + da, tb + db); // no workers: compute here
+  }
+  if (!ready && workers.length) return null;
+  if (performance.now() > rainDeadline) { dirty = true; return null; } // enough for this frame
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = TILE;
+  const c = canvas.getContext('2d');
+  const img = c.createImageData(TILE, TILE);
+  const mm = new Float32Array(TILE * TILE);
+  for (let j = 0; j < TILE; j++) {
+    for (let i = 0; i < TILE; i++) {
+      const a = ta * TILE + i, b = tb * TILE + j, q = j * TILE + i;
+      const sea = field.value(L, a, b) < 0;
+      mm[q] = field.rain.rainAt(...squareCentre(L, a, b)).mm;
+      const col = sea ? RAIN_SEA : rainColour(mm[q]);
+      img.data[q * 4] = col[0]; img.data[q * 4 + 1] = col[1]; img.data[q * 4 + 2] = col[2]; img.data[q * 4 + 3] = 255;
+    }
+  }
+  c.putImageData(img, 0, 0);
+  t = { canvas, mm };
+  rainTiles.set(key, t);
+  if (rainTiles.size > 2000) rainTiles.delete(rainTiles.keys().next().value);
+  return t;
+}
+
+function drawRainView(wx0, wy0, wx1, wy1) {
+  const L = RAIN_LEVEL, S = LEVELS[L].size, span = TILE * S;
+  pendingSquares = 0;
+  ctx.fillStyle = '#9a9a9a';
+  ctx.fillRect(0, 0, cssW, cssH);
+  const [a0, b0] = squareAt(L, wx0, wy0), [a1, b1] = squareAt(L, wx1, wy1);
+  ctx.imageSmoothingEnabled = false;
+  // Nearest the centre first, so the middle fills in first.
+  const ca = (a0 + a1) / 2 / TILE, cb = (b0 + b1) / 2 / TILE;
+  const list = [];
+  for (let tb = Math.floor(b0 / TILE); tb <= Math.floor(b1 / TILE); tb++) {
+    for (let ta = Math.floor(a0 / TILE); ta <= Math.floor(a1 / TILE); ta++) list.push([ta, tb, (ta + 0.5 - ca) ** 2 + (tb + 0.5 - cb) ** 2]);
+  }
+  list.sort((p, q) => p[2] - q[2]);
+  for (const [ta, tb] of list) {
+    const t = rainTile(ta, tb);
+    if (!t) { pendingSquares += TILE * TILE; continue; }
+    // Square a covers [a·S − GRID/2, (a+1)·S − GRID/2) (see squareAt).
+    const [x0, y0] = toScreen(ta * span - GRID / 2, tb * span - GRID / 2);
+    const [x1, y1] = toScreen((ta + 1) * span - GRID / 2, (tb + 1) * span - GRID / 2);
+    ctx.drawImage(t.canvas, x0, y0, x1 - x0, y1 - y0);
+  }
+  if (rainNeeds.length) pump();
+}
+
+/** Rainfall (mm a year) of the rain square at (x, y), if its tile is worked out. */
+function rainHere(x, y) {
+  const L = RAIN_LEVEL;
+  const [a, b] = squareAt(L, x, y);
+  const t = rainTiles.get(Math.floor(a / TILE) + ',' + Math.floor(b / TILE));
+  if (!t) return null;
+  return t.mm[(b - Math.floor(b / TILE) * TILE) * TILE + (a - Math.floor(a / TILE) * TILE)];
+}
+
+// ---------- Moisture tint ----------
+// In the elevation view, land is blended toward MOIST_GREEN by its yearly rainfall: up to
+// MOIST_MAX of the way at MOIST_FULL mm and more, less in proportion below. Rain is per
+// 100-mile square, so each square's is blended (bilinear) between the 4 rain-square
+// centres around it, to avoid blocks. Applied to the 100-mile squares and finer, once a
+// tile's colours are final and the rain around it is worked out (coarser squares, shown
+// zoomed far out, stay untinted).
+const MOIST_GREEN = [84, 132, 64];
+const MOIST_MAX = 0.5;
+const MOIST_FULL = 1500; // mm a year
+
+/** Rain (mm a year) of rain square (a, b), or null if its tile isn't worked out. */
+function rainOfSquare(a, b) {
+  const ta = Math.floor(a / TILE), tb = Math.floor(b / TILE);
+  const t = rainTile(ta, tb); // works it out, or asks for the elevation it needs
+  return t ? t.mm[(b - tb * TILE) * TILE + (a - ta * TILE)] : null;
+}
+
+/** Tint tile t's land by rainfall. Returns false (to try again later) if rain isn't ready. */
+function tintTile(t) {
+  const S = LEVELS[t.D].size, R = LEVELS[RAIN_LEVEL].size;
+  // Rain squares around the tile: their centres bracket every square centre in it.
+  const fx0 = (t.ta * TILE * S) / R - 0.5, fy0 = (t.tb * TILE * S) / R - 0.5;
+  const ra0 = Math.floor(fx0), rb0 = Math.floor(fy0);
+  const n = Math.ceil((TILE * S) / R) + 2;
+  const mm = new Float64Array(n * n);
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const v = rainOfSquare(ra0 + i, rb0 + j);
+      if (v === null) return false;
+      mm[j * n + i] = v;
+    }
+  }
+  if (!field.hasTile(t.D, t.ta, t.tb)) return false;
+  const values = field.tile(t.D, t.ta, t.tb).value;
+  for (let q = 0; q < TILE * TILE; q++) {
+    const v = values[q];
+    if (v < 0) continue; // sea
+    // Square centre in rain-square units (rain square a's centre is at a + 0.5).
+    const fx = ((t.ta * TILE + (q % TILE) + 0.5) * S) / R - 0.5 - ra0;
+    const fy = ((t.tb * TILE + Math.floor(q / TILE) + 0.5) * S) / R - 0.5 - rb0;
+    const i = Math.floor(fx), j = Math.floor(fy), u = fx - i, w = fy - j;
+    const m = (1 - w) * ((1 - u) * mm[j * n + i] + u * mm[j * n + i + 1]) + w * ((1 - u) * mm[(j + 1) * n + i] + u * mm[(j + 1) * n + i + 1]);
+    const k = MOIST_MAX * Math.min(1, m / MOIST_FULL);
+    const p = q * 4, c = lutIndex(v);
+    for (let ch = 0; ch < 3; ch++) t.rgba[p + ch] = LUT[c + ch] + (MOIST_GREEN[ch] - LUT[c + ch]) * k;
+  }
+  t.tinted = true;
+  return true;
+}
+
+// ---------- Rivers ----------
+// Blue lines (rivers.js): from a random start in some land 100-mile squares, downhill over
+// the 4-mile squares to the sea or a hollow, where a lake (filled 4-mile squares) forms.
+// Traced by the workers a tile of source squares at a time (they compute the 4-mile
+// elevations they need), all classes at once; drawing shows only the classes for the
+// current zoom: great rivers from far out, streams only close in (RIVER_CLASS_VIEW).
+// Widest view (miles across the screen) at which each size class (RIVER_CLASSES) shows.
+const RIVER_CLASS_VIEW = [500, 1500, 4000, 10000];
+const RIVER_SOURCE = [92, 156, 224];  // colour at the source (little water)...
+const RIVER_MOUTH = [28, 74, 160];    // ...deepening to this with RIVER_BANDS of flow
+const RIVER_BANDS = 8;                // width/colour steps: band = log2(1 + flow)
+const RIVER_TINTS = [[0, 0, 0], [-12, 10, -8], [8, -6, 10]]; // per-river: plain, greener, bluer-violet
+const RIVER_EDGE = 'rgba(240, 246, 250, 0.35)';
+const RIVER_FADE = 3;                 // pieces (4-mile steps) over which a river fades into the sea
+const LAKE_COLOUR = 'rgb(48, 98, 180)';
+const riverTiles = new Map(); // "ta,tb" -> [river, ...] (all classes)
+let riverNeeds = [];          // source tiles waiting for the workers (see pump)
+let riverLocal = null;        // main-thread tracer, only when there are no workers
+let lakeSquares = new Set();  // "i,j" of every 4-mile lake square drawn (no stamps there)
+let riverLayoutStale = false; // rivers arrived since the layout was worked out
+
+/**
+ * Where each river stops: rivers end where they meet another river or lake. Laid out
+ * biggest class first, then longest (ties by start point), each river runs until it enters a 4-mile square an
+ * earlier river or lake has taken, and ends there (the junction); if a lake it reaches
+ * would overlap one already taken, it ends before that lake. Sets r.keep (points to draw)
+ * and r.keepLakes on each river, and lakeSquares. Redone whenever more rivers arrive.
+ */
+function layOutRivers() {
+  riverLayoutStale = false;
+  const all = [];
+  for (const list of riverTiles.values()) for (const r of list) all.push(r);
+  // Bigger classes first (so hidden smaller rivers never cut a shown one short), then longest.
+  all.sort((p, q) => q.cls - p.cls || q.points.length - p.points.length || p.points[0][0] - q.points[0][0] || p.points[0][1] - q.points[0][1]);
+  const taken = new Set();
+  lakeSquares = new Set();
+  for (const r of all) {
+    const mine = [];
+    let keep = r.points.length, keepLakes = 0, li = 0;
+    for (let k = 1; k < r.points.length; k++) {
+      const [i, j] = squareAt(FLOW_LEVEL, ...r.points[k]);
+      const key = i + ',' + j;
+      if (taken.has(key)) { keep = k + 1; break; } // joins another river or lake here
+      mine.push(key);
+      // Lakes the river reaches at this point.
+      let blocked = false;
+      for (; li < r.lakes.length && r.lakes[li].at === k; li++) {
+        const sq = r.lakes[li].squares.map(([a, b]) => a + ',' + b);
+        if (sq.some((s) => taken.has(s))) { blocked = true; break; } // runs into another lake
+        mine.push(...sq);
+        keepLakes = li + 1;
+      }
+      if (blocked) { keep = k + 1; break; }
+    }
+    r.keep = keep;
+    r.keepLakes = keepLakes;
+    for (const key of mine) taken.add(key);
+    for (let k = 0; k < keepLakes; k++) for (const [a, b] of r.lakes[k].squares) lakeSquares.add(a + ',' + b);
+  }
+}
+
+function drawRivers(wx0, wy0, wx1, wy1) {
+  riverNeeds = [];
+  // The smallest class shown at this zoom.
+  const minClass = RIVER_CLASS_VIEW.findIndex((w) => view.width <= w);
+  if (minClass < 0) return;
+  const L = SOURCE_LEVEL;
+  // One tile of margin: rivers starting just off screen can run onto it.
+  const [a0, b0] = squareAt(L, wx0, wy0), [a1, b1] = squareAt(L, wx1, wy1);
+  const ta0 = Math.floor(a0 / TILE) - 1, ta1 = Math.floor(a1 / TILE) + 1;
+  const tb0 = Math.floor(b0 / TILE) - 1, tb1 = Math.floor(b1 / TILE) + 1;
+  if (riverLayoutStale) layOutRivers();
+  const lakes = [], shown = [];
+  for (let tb = tb0; tb <= tb1; tb++) {
+    for (let ta = ta0; ta <= ta1; ta++) {
+      let list = riverTiles.get(ta + ',' + tb);
+      if (!list) {
+        if (workers.length) {
+          riverNeeds.push({ rivers: true, ta, tb, key: 'R:' + ta + ',' + tb, left: 1 });
+          continue;
+        }
+        riverLocal ||= createRivers(field);
+        list = [];
+        for (let j = 0; j < TILE; j++) for (let i = 0; i < TILE; i++) {
+          const r = riverLocal.riverFrom(ta * TILE + i, tb * TILE + j);
+          if (r) list.push(r);
+        }
+        riverTiles.set(ta + ',' + tb, list);
+        riverLayoutStale = true;
+        dirty = true; // drawn once laid out, next frame
+      }
+      for (const r of list) {
+        if (r.keep === undefined || r.cls < minClass) continue; // not laid out yet, or too small for this zoom
+        shown.push(r);
+        for (let k = 0; k < r.keepLakes; k++) lakes.push(r.lakes[k].squares);
+      }
+    }
+  }
+  strokeRivers(shown);
+  // Lakes: their 4-mile squares as one shape (no seams between squares), filled over the
+  // rivers, and outlined in the same colour with round joins so the corners are softened.
+  const S = LEVELS[FLOW_LEVEL].size;
+  const lakePath = new Path2D();
+  for (const lake of lakes) {
+    for (const [i, j] of lake) {
+      const [x0, y0] = toScreen(i * S - GRID / 2, j * S - GRID / 2);
+      const [x1, y1] = toScreen((i + 1) * S - GRID / 2, (j + 1) * S - GRID / 2);
+      lakePath.rect(x0, y0, x1 - x0, y1 - y0);
+    }
+  }
+  ctx.fillStyle = ctx.strokeStyle = LAKE_COLOUR;
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(1, 0.35 * S / milesPerPx());
+  ctx.fill(lakePath);
+  ctx.stroke(lakePath);
+  if (riverNeeds.length) pump();
+}
+
+/**
+ * Rivers as smooth curves (through the midpoints between square centres), widening and
+ * deepening in colour downstream with the water gathered (flow), each river slightly
+ * tinted its own way, over a faint pale edge. Pieces are grouped by width and colour into
+ * one path per group, so a frame strokes a few dozen paths however many rivers there are.
+ */
+function strokeRivers(rivers) {
+  // Zoom: 4-mile squares under ~12 px get thinner lines, bigger ones thicker.
+  const zoom = Math.max(0.55, Math.min(1.8, (LEVELS[FLOW_LEVEL].size / milesPerPx()) / 12));
+  const groups = new Map(); // "tint:band" -> Path2D
+  const bandOf = (flow, cls) => Math.max(2 * cls, Math.min(RIVER_BANDS - 1, Math.floor(Math.log2(1 + flow))));
+  for (const r of rivers) {
+    const n = r.keep;
+    if (n < 2) continue;
+    const tint = Math.floor(hash(field.seed, Math.round(r.points[0][0]), Math.round(r.points[0][1]), 1300) * RIVER_TINTS.length);
+    const P = [];
+    for (let k = 0; k < n; k++) P.push(toScreen(...r.points[k]));
+    const mid = (k) => [(P[k][0] + P[k + 1][0]) / 2, (P[k][1] + P[k + 1][1]) / 2];
+    // Rivers reaching the sea (not cut short at a junction) fade out over their last
+    // RIVER_FADE pieces, widening slightly like an estuary.
+    const toSea = r.end === 'sea' && n === r.points.length;
+    // Piece k: from the midpoint before point k, curving through it, to the midpoint after.
+    for (let k = 0; k < n; k++) {
+      const fade = toSea ? Math.max(0, k - (n - 1 - RIVER_FADE)) : 0; // 0 = none .. RIVER_FADE
+      const key = tint + ':' + Math.min(RIVER_BANDS - 1, bandOf(r.flow[Math.min(k, r.flow.length - 1)], r.cls)) + ':' + fade;
+      let path = groups.get(key);
+      if (!path) groups.set(key, (path = new Path2D()));
+      const from = k === 0 ? P[0] : mid(k - 1);
+      const to = k === n - 1 ? P[n - 1] : mid(k);
+      path.moveTo(from[0], from[1]);
+      path.quadraticCurveTo(P[k][0], P[k][1], to[0], to[1]);
+    }
+  }
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  const entries = [...groups].map(([key, path]) => {
+    const [tint, band, fade] = key.split(':').map(Number);
+    const f = fade / (RIVER_FADE + 1); // 0 .. under 1
+    return { tint, band, path, alpha: 1 - f, width: (0.8 + 0.45 * band) * zoom * (1 + 0.6 * f) };
+  }).sort((p, q) => p.band - q.band);
+  // Pale edge first, then the water.
+  ctx.strokeStyle = RIVER_EDGE;
+  for (const e of entries) { ctx.globalAlpha = e.alpha; ctx.lineWidth = e.width + 1.6; ctx.stroke(e.path); }
+  for (const e of entries) {
+    const t = e.band / (RIVER_BANDS - 1);
+    const c = RIVER_SOURCE.map((v, i) => v + (RIVER_MOUTH[i] - v) * t + RIVER_TINTS[e.tint][i]);
+    ctx.strokeStyle = `rgb(${c.map((v) => Math.round(v)).join(',')})`;
+    ctx.globalAlpha = e.alpha;
+    ctx.lineWidth = e.width;
+    ctx.stroke(e.path);
+  }
+  ctx.globalAlpha = 1;
+}
+
 // ---------- Plates view ----------
 // Continents and hotspots only: each 1,000-mile square coloured by its plate (tan for
 // continental, blue for oceanic, each plate a slightly different shade), plate boundaries
@@ -935,6 +1306,19 @@ function updateHover() {
     readout.textContent = `${wx.toFixed(1)}, ${wy.toFixed(1)} mi · plate ${pl.id} (${pl.continental ? 'continental' : 'oceanic'})` + windText(wx, wy);
     return;
   }
+  if (settings.view === 'rain' && view.width <= RAIN_MAX_VIEW) {
+    const mm = rainHere(wx, wy);
+    if (mm === null) { hover.textContent = 'rain: working…'; readout.textContent = ''; return; }
+    const [ra, rb] = squareAt(RAIN_LEVEL, wx, wy);
+    const r = field.rain.rainAt(...squareCentre(RAIN_LEVEL, ra, rb));
+    const sea = field.value(RAIN_LEVEL, ra, rb) < 0;
+    hover.textContent = `${Math.round(mm).toLocaleString()} mm/yr${sea ? ' (sea)' : ''}`;
+    readout.textContent = `${wx.toFixed(1)}, ${wy.toFixed(1)} mi · rain ${Math.round(mm).toLocaleString()} mm/yr` +
+      ` · moisture arriving ${(r.moisture * 100).toFixed(0)}%` +
+      ` · climb ${r.climb >= 0 ? '+' : '−'}${Math.abs(Math.round(r.climb))} m` +
+      ` · traced ${r.steps * 100} mi upwind (100-mi square)` + windText(wx, wy);
+    return;
+  }
   hover.textContent = `${here} m`;
 
   const fmt = (v) => (v >= 0 ? '+' : '−') + Math.abs(Math.round(v));
@@ -979,6 +1363,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'v' || e.key === 'V') { toggleView(); return; }
   if (e.key === 'n' || e.key === 'N') { toggleWind(); return; }
   if (e.key === 'm' || e.key === 'M') { toggleMountains(); return; }
+  if (e.key === 'i' || e.key === 'I') { toggleRivers(); return; }
   if (e.key === '+' || e.key === '=') zoomAt(1 / 1.5, cssW / 2, cssH / 2);
   else if (e.key === '-' || e.key === '_') zoomAt(1.5, cssW / 2, cssH / 2);
   else keys.add(e.key.toLowerCase());

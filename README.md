@@ -35,12 +35,68 @@ Run: `./run.sh` (serves the folder and opens the browser).
   slope is partly turned to run along it; what still climbs is recorded as uplift (for
   rain later). Wind over land is slowed 15%. Below sea level counts as flat for steering.
 
+## Rainfall (`src/rain.js`)
+
+- One value per 100-mile square, traced backward: follow the wind upstream in 100-mile
+  steps, up to 4,000 miles (stopping in calm air), then come back downstream carrying
+  moisture. Over water the air picks moisture up (more in faster wind); at each step a
+  share falls as rain, more where the air climbs, much less where it goes downhill (rain
+  shadows), and more in slow air. A square's rain is what falls there times the wind speed.
+- Moisture only tapers over land, so far inland gets only small amounts. Median land
+  rainfall with sea this far upwind: 100–200 miles ~660 mm a year, 300–500 ~170 mm,
+  600–1,000 ~90 mm, 1,100–2,000 ~30 mm, 2,100–3,000 ~12 mm, 3,100–4,000 ~3 mm; nothing
+  beyond 4,000. Not yet included: latitude and pressure (wet equator
+  and lows, dry 30° belts and highs), temperature.
+
+## Rivers (`src/rivers.js`)
+
+- Each land 100-mile square may start a river at a random point inside it: a 50% chance
+  with 600 mm of rain a year or more, in proportion to its rain below that (so deserts
+  rarely start one).
+- The river runs downhill over the 4-mile squares, judging height by each square's
+  average over the 15 × 15 squares (60 miles) around it, so it follows the broad tilt of
+  the land rather than local bumps, plus 30% of the square's own difference from that
+  average, so it still wanders a little instead of running dead straight along the grid. From the square holding the start point it steps to
+  the lowest of the 8 around it, and so on. Where none is lower, it cuts the lowest one
+  down to just below its own level and flows through; cuts add up over consecutive steps
+  (a canyon through a rim) to at most 400 m, resetting where the ground falls away again.
+  It stops at the sea.
+- Past that it's in a hollow, which it fills as a lake (like rising water: always covering
+  the lowest square touching the lake next; ground the river has already been through
+  counts at its cut level and is covered, not walled off) until the water reaches the
+  lowest point of the rim; it spills there and the river carries on, except that half of
+  full lakes (decided by the spill point) never overflow and the river ends in them
+  (lakes touching the sea always drain into it). A river can only fill
+  as much lake as it has gathered water: each 4-mile step adds 2 lake squares' worth where
+  its 100-mile square gets 600 mm of rain a year, in proportion to the rain otherwise (at
+  most 2,000 squares in all). A hollow needing more ends it there, in a lake of the size
+  it can fill. So short rivers, and rivers through dry country, make small lakes.
+- Rivers end where they meet another river or lake. Rivers are traced independently, so
+  this is worked out when drawing: longest first, each river runs until it enters a square
+  an earlier river or lake has taken (the junction), or would fill a lake overlapping one.
+- Size classes by the water a river gathers by its end (rain along the way): great (about
+  the top 2% of rivers), major (next 6%), river (next 22%), else a stream. Each shows only
+  when the screen is under a width: great 10,000 miles, major 4,000, river 1,500, stream
+  500; so zooming in reveals more and more, and the long, well-fed rivers show first.
+  Bigger classes are laid out first (hidden small rivers never cut a shown one short) and
+  drawn at least moderately wide.
+- Drawn as blue lines with lakes as filled squares (**I**), in the elevation and rainfall
+  views; traced by the workers (all classes at once; a river's class is only known once
+  it's traced).
+- In this terrain (before trimming at junctions): rivers run a median of ~130 miles
+  (longest ~850); a bit over half reach the sea, the rest end in lakes. Lakes are typically
+  ~80 squares (~1,300 sq mi), at most a few hundred, and cover under 1% of land.
+
 ## Elevation model (`src/elevation.js`)
 
 - **1,000-mile squares**, each centred on a grid point. Each gets a random raw elevation
-  (seeded, deterministic) plus small random biases from the bigger squares it sits in
+  (seeded, deterministic; drawn around −770 m, so about 74% of the world is water) plus small random biases from the bigger squares it sits in
   (10K, 100K, 1M miles, …; more levels apply farther from the origin). Its average is the
   plain average of its own and its neighbours' raw values.
+- **Correlated detail**: at the finer levels each square's raw value is the sum of random
+  draws over the 5 × 5 squares around it (scaled to the same spread), so bumps and dips
+  span several squares rather than being square-by-square static; biases are rescaled so
+  their spread is unchanged (`CORRELATION`).
 - **Finer levels**: 500-mile squares (2×2 per parent), then 100-mile squares (5×5 per
   parent). A square's value = what it inherits from the level above + its own bias (the
   plain average of the raw values around it).
@@ -77,8 +133,14 @@ Settings are in `LEVELS`, `RAW_MEAN`/`RAW_STD`, `BIAS_*`, `WIDE_FRACTION`,
 - Hover: elevation of the square under the cursor. On-map elevation labels are hidden by
   default (**L** shows them).
 - Click a square: popup with its full breakdown (Esc closes).
-- Views (**V**): elevation, or plates & hotspots only (plate types, boundaries, motion
-  arrows, hotspot chains; no elevation).
+- Land in the elevation view is tinted greener by rainfall (up to half way to olive green
+  at 1,500 mm a year, less in proportion), blended smoothly between 100-mile rain squares;
+  applied to the 100-mile squares and finer (screen under ~15,000 miles across), once the
+  rain around a tile is worked out.
+- Views (**V**): elevation; plates & hotspots only (plate types, boundaries, motion
+  arrows, hotspot chains; no elevation); or rainfall (dry tan through greens to blue per
+  100-mile square, sea dark blue; hover shows mm a year, moisture arriving, climb). The
+  rainfall view needs the screen under 20,000 miles across; beyond that it shows elevation.
 - Plates overlay on the elevation view (**P**): boundaries by type, motion arrows, hotspots. Hidden by default.
 - Mountain stamps (**M**): hand-drawn-style mountains, fixed in the world (one per stamped
   4-mile square, two overlapping in half of them; 3–6 miles wide) so zooming just scales them; hidden once a 5-mile stamp is
@@ -88,11 +150,12 @@ Settings are in `LEVELS`, `RAW_MEAN`/`RAW_STD`, `BIAS_*`, `WIDE_FRACTION`,
   uneven top, steep sides), then by prominence (how far it stands above the ground ~20 miles around)
   spires, peaks, hills, rises and knolls (`RELIEF_TERRAIN` in `src/mountains.js`). Spires and
   peaks need less prominence on high ground (60% as much at 3,000 m+, and half that again on
-  the highest 5% of land, from ~2,900 m). No
+  the highest 5% of land, from ~2,400 m). No
   stamps at all within ~5 miles of the sea (next to a sea square), and no spires or peaks
   within 20 miles. They take
   their colours from the land colour at their elevation (lit face slightly lighter, shading
-  and ink darker, ink partly see-through) and fade out at the base into the ground. The older
+  and ink darker, ink partly see-through) and fade out at the base into the ground.
+  None are drawn on lake squares while rivers and lakes are shown. The older
   altitude-based 100-mile set (`STAMP_TERRAIN`) is still in the file but unused. `stamps.html`
   previews the relief set in map colours at a chosen elevation, then the older set.
 - Wind overlay (**N**): steered wind arrows, H/L pressure centres, latitude lines.

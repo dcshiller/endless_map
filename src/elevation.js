@@ -28,15 +28,16 @@
 import { hash, normal as normalRandom, seedFromString, keyOf } from './random.js';
 import { createPlates } from './plates.js';
 import { createHotspots } from './hotspots.js';
+import { createRain, RAIN_LEVEL } from './rain.js';
 import { createClimate } from './climate.js';
 
 export const GRID = 1000; // miles
 
-// Raw elevations are roughly normally distributed around 0, plus the plate base
+// Raw elevations are roughly normally distributed around RAW_MEAN, plus the plate base
 // (continental plates high, oceanic low; see plates.js). Plate-boundary effects (mountain
 // belts, ridges, rifts, trenches) are added after smoothing (see average()).
 // Averaging shrinks the random spread to about 0.33x (narrow) or 0.2x (wide), ±1150 m.
-export const RAW_MEAN = 0;    // m
+export const RAW_MEAN = -770; // m: below 0 so about 74% of the world is water (it was 62% at 0)
 export const RAW_STD = 4000;  // m
 
 // Bias squares: every grid point inside a square of a bias level gets that square's random
@@ -112,6 +113,29 @@ function remember(cache, key, v, max) {
 // up to TILE_STORE_MAX blocks per level are kept.
 export const TILE = 16;
 const TILE_STORE_MAX = 4000;
+
+// Correlated detail: at the finer levels (L >= 1), each square's raw value isn't an
+// independent random draw but the sum of independent draws over the (2·CORRELATION + 1)²
+// squares around it, scaled to the same spread (rawStd). Neighbouring squares share most of
+// their draws, so bumps and dips come in shapes several squares across instead of
+// square-by-square static. After the usual smoothing (below), biases are rescaled by
+// CORR_SCALE so their spread is what it would be without correlation: same heights, only
+// the shape changes.
+export const CORRELATION = 2;
+
+/** Rescaling, by smoothing radius r, that keeps biases' spread unchanged (see CORRELATION). */
+const CORR_SCALE = [0, 1, 2].map((r) => {
+  // Weights of the original draws in a bias: a box of side 2C+1 (scaled by 1 / (2C+1))
+  // averaged over a box of side 2r+1 (weights 1 / (2r+1)²).
+  const c = 2 * CORRELATION + 1, s = 2 * r + 1, n = c + s - 1;
+  let sumSq = 0;
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const cover = (k) => Math.min(k, c - 1, s - 1, n - 1 - k) + 1; // 1D overlap count
+    const w = (cover(x) * cover(y)) / (c * s * s);
+    sumSq += w * w;
+  }
+  return 1 / s / Math.sqrt(sumSq); // target spread 1/s (plain average of s² independent draws)
+});
 
 // Smoothing: a plain (uniform) average. Most squares average themselves with the 8 squares
 // around them (radius 1); WIDE_FRACTION of squares, chosen at random per square, average
@@ -234,14 +258,20 @@ export function createElevation(seedInput = 'dnd', { wideFraction = WIDE_FRACTIO
     return core(0, i, j);
   }
 
-  /** Raw (pre-smoothing) value of level-L square (a, b), in meters (L >= 1). */
+  /**
+   * Raw (pre-smoothing) value of level-L square (a, b), in meters (L >= 1): the draws over
+   * the squares CORRELATION around it, summed and scaled to spread rawStd.
+   */
   function levelRaw(L, a, b) {
-    return LEVELS[L].rawStd * normal(a, b, 200 + 10 * L);
+    const C = CORRELATION, ch = 200 + 10 * L;
+    let v = 0;
+    for (let db = -C; db <= C; db++) for (let da = -C; da <= C; da++) v += normal(a + da, b + db, ch);
+    return LEVELS[L].rawStd * v / (2 * C + 1);
   }
 
   /** Undamped bias of level-L square (a, b): plain average of the raw values around it. */
   function rawBias(L, a, b) {
-    return blend(L, a, b, (x, y) => levelRaw(L, x, y));
+    return blend(L, a, b, (x, y) => levelRaw(L, x, y)) * CORR_SCALE[isWide(L, a, b) ? 2 : 1];
   }
 
   /** Bias of level-L square (a, b) as applied: damped under the sea (seaRoughness). */
@@ -293,9 +323,25 @@ export function createElevation(seedInput = 'dnd', { wideFraction = WIDE_FRACTIO
     if (L === 0) {
       for (let j = 0; j < W; j++) for (let i = 0; i < W; i++) raws[j * W + i] = raw(a0 - 2 + i, b0 - 2 + j);
     } else {
-      const std = LEVELS[L].rawStd, channel = 200 + 10 * L;
+      // Correlated raw values (same as levelRaw): draws over a wider margin, summed over
+      // each square's (2C+1)² box with running sums along rows, then along columns.
+      const std = LEVELS[L].rawStd, channel = 200 + 10 * L, C = CORRELATION, M = 2 + C, WN = TILE + 2 * M;
+      const draws = new Float64Array(WN * WN);
+      for (let j = 0; j < WN; j++) for (let i = 0; i < WN; i++) draws[j * WN + i] = normal(a0 - M + i, b0 - M + j, channel);
+      const rows = new Float64Array(WN * W); // rows[j][i]: sum along the row of the box for raw column i
+      for (let j = 0; j < WN; j++) {
+        for (let i = 0; i < W; i++) {
+          let v = 0;
+          for (let d = 0; d <= 2 * C; d++) v += draws[j * WN + i + d];
+          rows[j * W + i] = v;
+        }
+      }
       for (let j = 0; j < W; j++) {
-        for (let i = 0; i < W; i++) raws[j * W + i] = std * normal(a0 - 2 + i, b0 - 2 + j, channel);
+        for (let i = 0; i < W; i++) {
+          let v = 0;
+          for (let d = 0; d <= 2 * C; d++) v += rows[(j + d) * W + i];
+          raws[j * W + i] = std * v / (2 * C + 1);
+        }
       }
     }
     const cores = new Float64Array(TILE * TILE), values = new Float64Array(TILE * TILE);
@@ -321,7 +367,7 @@ export function createElevation(seedInput = 'dnd', { wideFraction = WIDE_FRACTIO
           const row = (j + 2 + db) * W + i + 2;
           for (let da = -r; da <= r; da++) sum += raws[row + da];
         }
-        const smoothed = sum / ((2 * r + 1) * (2 * r + 1));
+        const smoothed = sum / ((2 * r + 1) * (2 * r + 1)) * (L > 0 ? CORR_SCALE[r] : 1);
         let c;
         if (L === 0) {
           // The 1,000-mile average, plus plate boundary effects and the continental shelf.
@@ -398,5 +444,12 @@ export function createElevation(seedInput = 'dnd', { wideFraction = WIDE_FRACTIO
     return t ? t.value[(b - tb * TILE) * TILE + (a - ta * TILE)] : undefined;
   }
 
-  return { tile: tileOf, importTile, hasTile, average, raw, levelRaw, biases, value, core, hotspot, peek, inherited, bias, rawBias, isWide, wideFraction, plates, hotspots, climate, seed };
+  // Rainfall (rain.js) on the 100-mile squares: reads the weather and those squares'
+  // elevations (sea surface counts as 0).
+  const rain = createRain(climate, (x, y) => {
+    const e = value(RAIN_LEVEL, ...squareAt(RAIN_LEVEL, x, y));
+    return { h: Math.max(0, e), water: e < 0 };
+  });
+
+  return { tile: tileOf, importTile, hasTile, average, raw, levelRaw, biases, value, core, hotspot, peek, inherited, bias, rawBias, isWide, wideFraction, plates, hotspots, climate, rain, seed };
 }

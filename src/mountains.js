@@ -288,7 +288,7 @@ export const RELIEF_TERRAIN = {
   scarpE: 'Cliff facing east: the ground east (20 mi) is 140 m or more lower, the west side no higher and dropping under 30% as much. Gentle back slope west (~2.5%).',
   scarpW: 'Same, mirrored: cliff facing west (~2%).',
   mesa: 'Broad-topped: 90 m or more above the ring, but under 5% of that above its 8 neighbours, so the top is broad (~3%).',
-  spire: 'The most prominent spots: 255 m or more above the ring (~0.6%), easing to 153 m on ground at 3,000 m and up, and to half that on the highest 5% of land (from ~2,900 m).',
+  spire: 'The most prominent spots: 255 m or more above the ring (~0.6%), easing to 153 m on ground at 3,000 m and up, and to half that on the highest 5% of land (from ~2,400 m).',
   peak: 'Clear mountains: 192–255 m above the ring (~1.7%), easing to 115–153 m on ground at 3,000 m and up, and to half that on the highest 5% of land.',
   hill: 'Hills: 90 m above the ring, up to where peaks start (~8%).',
   rise: 'Low rises: 45–90 m above the ring (~13%).',
@@ -298,12 +298,12 @@ export const RELIEF_TERRAIN = {
 // Mountains are commoner on high ground (still rugged, recently raised) than in worn-down
 // lowlands: the spire and peak thresholds are scaled by a factor easing from 1 at
 // MOUNTAIN_EASE[0] m and below to MOUNTAIN_HIGH_SCALE at MOUNTAIN_EASE[1] m and above.
-// On top of that, the highest ground (the top 5% of land, from about 2,900 m in this
+// On top of that, the highest ground (the top 5% of land, from about 2,400 m in this
 // terrain) has its thresholds scaled again by MOUNTAIN_TOP_SCALE, eased in over the 200 m
 // below, which doubles its share of mountains (about 16% of squares to 32%).
 export const MOUNTAIN_EASE = [1000, 3000];
 export const MOUNTAIN_HIGH_SCALE = 0.6;
-export const MOUNTAIN_TOP = [2700, 2900];
+export const MOUNTAIN_TOP = [2200, 2400];
 export const MOUNTAIN_TOP_SCALE = 0.5;
 
 /** Spire/peak threshold scale for elevation e (m). */
