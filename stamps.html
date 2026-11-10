@@ -14,12 +14,28 @@
   .cell svg { width: 100%; height: 80px; }
   .cell span { font-size: 11px; color: #6b5640; }
   .chain { width: 100%; max-width: 1200px; background: #e2cda5; border-radius: 6px; display: block; }
+  .kind { display: grid; grid-template-columns: 170px 1fr; gap: 12px; align-items: start; margin-bottom: 10px; }
+  .kind h3 { font-size: 14px; margin: 4px 0 2px; }
+  .kind p { font-size: 12px; margin: 0; }
+  .row { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+  .row .cell { padding: 4px 4px 0; }
+  .row .cell svg { height: 70px; }
+  .elev { margin: 4px 0 12px; }
+  .elev button.on { background: #3b2a1a; color: #fffaf0; }
+  @media (max-width: 640px) { .kind { grid-template-columns: 1fr; } .row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid #b59a72; background: #fffaf0; cursor: pointer; }
 </style>
 </head>
 <body>
 <h1>Mountain stamps</h1>
 <p>Generated from a seed in <code>src/mountains.js</code>. Each stamp is filled, so nearer ones hide farther ones.</p>
+
+<h2>Relief stamps (used on the map)</h2>
+<p>The map's set (seed "dnd"), coloured as on the map for ground at the chosen elevation. Each kind's rule for where it goes is beside it.</p>
+<div class="elev" id="elev"></div>
+<div id="relief"></div>
+
+<h2>Older altitude-based stamps (not used on the map)</h2>
 <button id="reseed">New seed</button> <span id="seedLabel"></span>
 
 <h2>Sample chains</h2>
@@ -29,8 +45,34 @@
 <div class="grid" id="grid"></div>
 
 <script type="module">
-import { makeStamps, stampGroup, stampSvg } from './src/mountains.js';
-import { hash } from './src/random.js';
+import { makeStamps, stampGroup, stampSvg, reliefStampsByKind, reliefSvg, RELIEF_TERRAIN, RELIEF_KINDS } from './src/mountains.js';
+import { hash, seedFromString } from './src/random.js';
+import { colour } from './src/colour.js';
+
+// ---- Relief stamps: the map's set, coloured for a chosen elevation ----
+const NAMES = { spire: 'Spire', peak: 'Peak', hill: 'Hill', rise: 'Rise', knoll: 'Knoll', scarpE: 'Escarpment, cliff east', scarpW: 'Escarpment, cliff west', mesa: 'Mesa' };
+const ORDER = ['spire', 'peak', 'hill', 'rise', 'knoll', 'scarpE', 'scarpW', 'mesa'].filter((k) => RELIEF_KINDS.includes(k));
+const ELEVS = [100, 800, 1600, 2500, 3500];
+const relief = reliefStampsByKind(seedFromString('dnd'));
+let elev = 800;
+
+function renderRelief() {
+  document.getElementById('elev').innerHTML = 'Ground elevation: ' + ELEVS
+    .map((e) => `<button data-e="${e}" class="${e === elev ? 'on' : ''}">${e.toLocaleString()} m</button>`).join(' ');
+  const bg = `rgb(${colour(elev).map((v) => v | 0).join(',')})`;
+  document.getElementById('relief').innerHTML = ORDER.map((kind) => `
+    <div class="kind">
+      <div><h3>${NAMES[kind] || kind}</h3><p>${RELIEF_TERRAIN[kind] || ''}</p></div>
+      <div class="row">${relief[kind].map((st) => `<div class="cell" style="background:${bg}">${reliefSvg(st, elev)}</div>`).join('')}</div>
+    </div>`).join('');
+}
+document.getElementById('elev').addEventListener('click', (ev) => {
+  const e = Number(ev.target.dataset?.e);
+  if (e) { elev = e; renderRelief(); }
+});
+renderRelief();
+
+// ---- Older altitude-based stamps ----
 
 let seed = 1;
 

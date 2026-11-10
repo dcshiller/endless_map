@@ -72,14 +72,29 @@ Settings are in `LEVELS`, `RAW_MEAN`/`RAW_STD`, `BIAS_*`, `WIDE_FRACTION`,
 
 - Zoom from 100,000 miles across to 1 mile; the finest square level that is at least 8 px
   on screen is drawn (1,000 mi down to 0.1 mi); zooming in stops once 0.1-mile squares show.
-- Rendering: smooth (colours blend between square centres) or blocky (flat squares) (**R**).
+- Rendering: smooth (colours blend near square edges, over about 1/3 of a square; `BLEND_STEPS` in main.js) or blocky (flat squares) (**R**).
 - Drag / arrows / WASD to pan, wheel or +/− to zoom.
 - Hover: elevation of the square under the cursor. On-map elevation labels are hidden by
   default (**L** shows them).
 - Click a square: popup with its full breakdown (Esc closes).
 - Views (**V**): elevation, or plates & hotspots only (plate types, boundaries, motion
   arrows, hotspot chains; no elevation).
-- Plates overlay on the elevation view (**P**): boundaries by type, motion arrows, hotspots.
+- Plates overlay on the elevation view (**P**): boundaries by type, motion arrows, hotspots. Hidden by default.
+- Mountain stamps (**M**): hand-drawn-style mountains, fixed in the world (one per stamped
+  4-mile square, two overlapping in half of them; 3–6 miles wide) so zooming just scales them; hidden once a 5-mile stamp is
+  under 10 px (screen wider than ~500 miles), faded out when huge. Chosen by
+  the shape of the ground around a square, not altitude, on any land:
+  escarpments (gentle slope up to a cliff, facing east or west), mesas (broad,
+  uneven top, steep sides), then by prominence (how far it stands above the ground ~20 miles around)
+  spires, peaks, hills, rises and knolls (`RELIEF_TERRAIN` in `src/mountains.js`). Spires and
+  peaks need less prominence on high ground (60% as much at 3,000 m+, and half that again on
+  the highest 5% of land, from ~2,900 m). No
+  stamps at all within ~5 miles of the sea (next to a sea square), and no spires or peaks
+  within 20 miles. They take
+  their colours from the land colour at their elevation (lit face slightly lighter, shading
+  and ink darker, ink partly see-through) and fade out at the base into the ground. The older
+  altitude-based 100-mile set (`STAMP_TERRAIN`) is still in the file but unused. `stamps.html`
+  previews the relief set in map colours at a chosen elevation, then the older set.
 - Wind overlay (**N**): steered wind arrows, H/L pressure centres, latitude lines.
 - Settings menu (top right): wide smoothing none / 1/3 (**T**).
 

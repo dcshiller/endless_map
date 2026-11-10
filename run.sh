@@ -17,4 +17,13 @@ echo "Serving map at $url  (Ctrl+C to stop)"
 # Open the browser once the server has had a moment to start.
 ( sleep 0.5; xdg-open "$url" >/dev/null 2>&1 || open "$url" >/dev/null 2>&1 || true ) &
 
-exec python3 -m http.server "$port" --bind 127.0.0.1
+# A plain static server that tells the browser to re-check files on every load, so edits
+# show up on refresh (python's default server lets browsers reuse stale scripts).
+exec python3 -c '
+import http.server, sys
+class NoCache(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), NoCache).serve_forever()
+' "$port"

@@ -5,6 +5,9 @@ import { createElevation, GRID, LEVELS, TILE, squareAt, squareCentre, parentOf, 
 import { PLATE_CELL, boundaryKind } from './plates.js';
 import { HOTSPOT_CELL, CHAIN_REACH } from './hotspots.js';
 import { POLE_DISTANCE, CELL_SIZE, MAX_CELL_RADIUS } from './climate.js';
+import { reliefStampsByKind, reliefKindFor, reliefColours, RELIEF_STYLE } from './mountains.js';
+import { colour } from './colour.js';
+import { hash } from './random.js';
 
 const MAX_VIEW = 100000; // miles across the screen, fully zoomed out
 
@@ -23,7 +26,8 @@ const labelRadios = [...document.querySelectorAll('input[name="labels"]')];
 const plateRadios = [...document.querySelectorAll('input[name="plates"]')];
 const viewRadios = [...document.querySelectorAll('input[name="view"]')];
 const windRadios = [...document.querySelectorAll('input[name="wind"]')];
-const settings = { wideFraction: field.wideFraction, smooth: true, labels: false, plates: true, view: 'elevation', wind: false };
+const mountainRadios = [...document.querySelectorAll('input[name="mountains"]')];
+const settings = { wideFraction: field.wideFraction, smooth: true, labels: false, plates: false, view: 'elevation', wind: false, mountains: true };
 
 /** Apply changed settings; keep the view and any popup. */
 function applySettings(changes) {
@@ -33,6 +37,7 @@ function applySettings(changes) {
     // Only the model's own settings need a new field (and new colours for every square).
     field = createElevation(SEED, { wideFraction: settings.wideFraction });
     tileCache = new Map();
+    stampTiles.clear();
     workTiles = []; // old tiles; the next draw lists the new ones
     configureWorkers();
   }
@@ -41,6 +46,7 @@ function applySettings(changes) {
   for (const r of plateRadios) r.checked = (r.value === 'on') === settings.plates;
   for (const r of viewRadios) r.checked = r.value === settings.view;
   for (const r of windRadios) r.checked = (r.value === 'on') === settings.wind;
+  for (const r of mountainRadios) r.checked = (r.value === 'on') === settings.mountains;
   for (const r of wideRadios) r.checked = Math.abs(Number(r.value) - settings.wideFraction) < 1e-6;
   if (selected) popup.innerHTML = popupHtml(selected.L, selected.a, selected.b), bindPopupClose();
   dirty = true;
@@ -51,6 +57,7 @@ for (const r of labelRadios) r.addEventListener('change', () => applySettings({ 
 for (const r of plateRadios) r.addEventListener('change', () => applySettings({ plates: r.value === 'on' }));
 for (const r of viewRadios) r.addEventListener('change', () => applySettings({ view: r.value }));
 for (const r of windRadios) r.addEventListener('change', () => applySettings({ wind: r.value === 'on' }));
+for (const r of mountainRadios) r.addEventListener('change', () => applySettings({ mountains: r.value === 'on' }));
 
 /** Move to the next option in a radio group (wrapping). */
 const nextValue = (radios) => radios[(radios.findIndex((r) => r.checked) + 1) % radios.length].value;
@@ -60,6 +67,7 @@ const toggleLabels = () => applySettings({ labels: !settings.labels });
 const togglePlates = () => applySettings({ plates: !settings.plates });
 const toggleView = () => applySettings({ view: settings.view === 'plates' ? 'elevation' : 'plates' });
 const toggleWind = () => applySettings({ wind: !settings.wind });
+const toggleMountains = () => applySettings({ mountains: !settings.mountains });
 
 const view = { cx: 0, cy: 0, width: 6000 }; // centre (miles) and miles across the screen
 let cssW = 0, cssH = 0, dpr = 1;
@@ -80,30 +88,7 @@ const toWorld = (sx, sy) => [view.cx + (sx - cssW / 2) * milesPerPx(), view.cy +
 const toScreen = (x, y) => [(x - view.cx) / milesPerPx() + cssW / 2, (y - view.cy) / milesPerPx() + cssH / 2];
 
 // ---------- Colour ----------
-// Elevation only, no vegetation: blues for water (darker = deeper), browns for land
-// (darker = higher).
-const STOPS = [
-  [-4000, [29, 59, 92]],
-  [-1000, [52, 98, 140]],
-  [-1, [111, 163, 192]],
-  [0, [226, 205, 165]],
-  [500, [201, 168, 120]],
-  [1500, [166, 122, 78]],
-  [3000, [118, 82, 50]],
-  [4500, [78, 52, 30]],
-];
-function colour(e) {
-  if (e <= STOPS[0][0]) return STOPS[0][1];
-  for (let k = 0; k < STOPS.length - 1; k++) {
-    const [e0, c0] = STOPS[k], [e1, c1] = STOPS[k + 1];
-    if (e <= e1) {
-      const t = (e - e0) / (e1 - e0);
-      return [c0[0] + (c1[0] - c0[0]) * t, c0[1] + (c1[1] - c0[1]) * t, c0[2] + (c1[2] - c0[2]) * t];
-    }
-  }
-  return STOPS[STOPS.length - 1][1];
-}
-
+// Elevation colours: see colour.js.
 // Precomputed colours every LUT_STEP metres, so drawing a square is a table lookup.
 const LUT_MIN = -8000, LUT_MAX = 8000, LUT_STEP = 5;
 const LUT = new Uint8ClampedArray(((LUT_MAX - LUT_MIN) / LUT_STEP + 1) * 3);
@@ -132,8 +117,8 @@ const minView = () => (LEVELS[FINEST].size / MIN_SQUARE_PX) * cssW;
 
 // ---------- Rendering the shown level ----------
 // Squares are coloured into an off-screen image with one pixel per square, which is then
-// stretched over the screen: with smooth blending (colours fade between square centres) or
-// without (flat blocks). Still one value per square, not per screen pixel.
+// stretched over the screen: with smooth blending (colours fade near square edges, see
+// BLEND_STEPS) or without (flat blocks). Still one value per square, not per screen pixel.
 //
 // Squares are kept in tiles of TILE x TILE (the same tiles the model computes), each
 // holding its squares' colours, so a frame only copies tile rows; drawing never computes
@@ -149,6 +134,11 @@ const progress = document.getElementById('progress');
 const off = document.createElement('canvas');
 const offCtx = off.getContext('2d');
 let offImg = null;
+// Smooth rendering blends colours over about 1/BLEND_STEPS of a square's width at its
+// edges (1 = blend all the way between square centres; higher = sharper).
+const BLEND_STEPS = 3;
+const sharp = document.createElement('canvas');
+const sharpCtx = sharp.getContext('2d');
 
 /** Write the colour for elevation v (or grey if unknown) into rgba at pixel p. */
 function putColour(rgba, p, v) {
@@ -267,10 +257,10 @@ function onTiles(w, msg) {
   pump();
 }
 
-/** Hand the view's missing tiles to idle workers, nearest the centre first. */
+/** Hand the view's missing tiles (then those the stamps need) to idle workers, nearest the centre first. */
 function pump() {
   if (!workers.length) { scheduleWork(); return; }
-  for (const t of workTiles) {
+  for (const t of [...workTiles, ...stampNeeds]) {
     if (!t.left || inFlight.has(t.key)) continue;
     let w = workers[0];
     for (const x of workers) if (x.busy < w.busy) w = x;
@@ -360,9 +350,232 @@ function drawLevel(D, smooth) {
 
   // Pixel k covers square a0 + k exactly, so pixel centres land on square centres.
   const [x0, y0] = toScreen(a0 * S - GRID / 2, b0 * S - GRID / 2);
+  const dw = w * S / milesPerPx(), dh = h * S / milesPerPx();
+  // Smooth mode: first enlarge to BLEND_STEPS pixels per square with flat blocks, then
+  // stretch that with bilinear blending, so colours only fade across the outer part of
+  // each square (about 1/BLEND_STEPS of its width) instead of all the way between centres.
+  const k = smooth ? Math.min(BLEND_STEPS, Math.floor(S / milesPerPx())) : 1;
+  let src = off;
+  if (k > 1) {
+    if (sharp.width !== w * k || sharp.height !== h * k) { sharp.width = w * k; sharp.height = h * k; }
+    sharpCtx.imageSmoothingEnabled = false;
+    sharpCtx.drawImage(off, 0, 0, w * k, h * k);
+    src = sharp;
+  }
   ctx.imageSmoothingEnabled = smooth;
   ctx.imageSmoothingQuality = 'low'; // plain bilinear: same look when enlarging, much cheaper
-  ctx.drawImage(off, x0, y0, w * S / milesPerPx(), h * S / milesPerPx());
+  ctx.drawImage(src, x0, y0, dw, dh);
+}
+
+// ---------- Mountain stamps ----------
+// Relief stamps on ground that stands out from its surroundings, of the kind its shape
+// calls for (prominence, a cliff on one side, a flat top) (see RELIEF_TERRAIN in mountains.js), at any altitude on land. They're fixed in
+// the world: each 4-mile square (level STAMP_LEVEL) gets at most one, decided once from that
+// square's terrain, with its own position and width in miles. Zooming just scales them. They're hidden when too small to read (zoomed far out)
+// and fade out when huge (zoomed far in). Drawn back to front, filled with a lightened land
+// colour so they sit on the map.
+const STAMP_LEVEL = 4;                                        // the 4-mile squares
+const STAMP_RING = 5;                                         // prominence ring: 5 squares (20 miles) out
+const STAMP_MILES = { spire: 5, peak: 6, hill: 3.5, rise: 3, knoll: 2.5, scarpE: 6, scarpW: 6, mesa: 5 }; // widths
+const STAMP_CHANCE = { spire: 1, peak: 1, hill: 0.9, rise: 0.6, knoll: 0.45, scarpE: 0.9, scarpW: 0.9, mesa: 0.9 };
+const STAMP_SHORE = 1;        // no stamps at all with sea within this many squares (~5 miles)
+const STAMP_COAST = 5;        // no spires or peaks with sea within this many squares (20 miles)
+const STAMP_PAIR_CHANCE = 0.5; // share of stamped squares with two overlapping stamps
+const STAMP_MIN_PX = 10;          // hide all stamps when a 5-mile stamp would be narrower than this
+const STAMP_FADE_PX = [350, 700]; // a stamp fades out between these widths
+let stampSet = null, stampSeed = null;
+let stampNeeds = []; // stamp-level tiles to fetch from the workers (see pump)
+
+/** Path2D versions of a stamp's layers (cached on the stamp). */
+function stampPaths(st) {
+  return st.p2d ||= st.peaks.map((p) => ({ fill: new Path2D(p.fill), shade: new Path2D(p.shade), hatch: new Path2D(p.hatch), ink: new Path2D(p.ink) }));
+}
+
+function drawMountains() {
+  stampNeeds = [];
+  const pxPerMile = 1 / milesPerPx();
+  if (5 * pxPerMile < STAMP_MIN_PX) return;
+  if (stampSeed !== field.seed) { stampSet = reliefStampsByKind(field.seed); stampSeed = field.seed; stampTiles.clear(); }
+  const L = STAMP_LEVEL;
+  // Margin: stamps whose square is just off screen still overhang onto it.
+  const m = 10; // miles
+  const [wx0, wy0] = toWorld(0, 0), [wx1, wy1] = toWorld(cssW, cssH);
+  const [a0, b0] = squareAt(L, wx0 - m, wy0 - m), [a1, b1] = squareAt(L, wx1 + m, wy1 + m);
+  const list = [];
+  for (let tb = Math.floor(b0 / TILE); tb <= Math.floor(b1 / TILE); tb++) {
+    for (let ta = Math.floor(a0 / TILE); ta <= Math.floor(a1 / TILE); ta++) {
+      for (const c of stampsInTile(ta, tb)) {
+        const size = c.miles * pxPerMile;
+        if (size > STAMP_FADE_PX[1]) continue;
+        const [sx, sy] = toScreen(c.x, c.y);
+        list.push({ c, sx, sy, size });
+      }
+    }
+  }
+  if (stampNeeds.length) pump();
+  list.sort((p, q) => p.c.y - q.c.y); // back to front
+  for (const { c, sx, sy, size } of list) {
+    ctx.globalAlpha = Math.min(1, Math.max(0, (STAMP_FADE_PX[1] - size) / (STAMP_FADE_PX[1] - STAMP_FADE_PX[0])));
+    if (size <= 200) {
+      // Pre-rendered bitmap at the nearest of a series of sizes (8% apart), scaled to fit.
+      const bucket = Math.round(Math.log(size) / Math.log(1.08));
+      const sp = stampSprite(c.st, bucket, c.shade);
+      const k = size / sp.size;
+      ctx.drawImage(sp.canvas, sx - sp.ax * k, sy - sp.ay * k, sp.w * k, sp.h * k);
+    } else {
+      // Big (few on screen): rendered fresh each frame into one reusable canvas.
+      const sp = renderStamp(c.st, size, c.shade, bigStampCanvas);
+      ctx.drawImage(sp.canvas, 0, 0, sp.canvas.width, sp.canvas.height, sx - sp.ax, sy - sp.ay, sp.w, sp.h);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Stamp candidates per tile of stamp-level squares, decided once (when the tile and its
+// neighbours' values are known): { st, x, y (world miles, the stamp's base), miles (width),
+// shade }. Missing tiles are fetched from the workers.
+const stampTiles = new Map();
+
+/** Is any stamp-level square within n squares of (a, b) below sea level? */
+function seaWithin(a, b, n) {
+  for (let db = -n; db <= n; db++) for (let da = -n; da <= n; da++) {
+    if (field.value(STAMP_LEVEL, a + da, b + db) < 0) return true;
+  }
+  return false;
+}
+
+function stampsInTile(ta, tb) {
+  const L = STAMP_LEVEL, key = ta + ',' + tb;
+  let t = stampTiles.get(key);
+  if (t && t.complete) return t.list;
+  // The tile and its neighbours (for edge squares' neighbours) must be computed.
+  let ready = true;
+  for (let db = -1; db <= 1; db++) for (let da = -1; da <= 1; da++) {
+    if (field.hasTile(L, ta + da, tb + db)) continue;
+    ready = false;
+    if (workers.length) stampNeeds.push({ D: L, ta: ta + da, tb: tb + db, key: L + ':' + (ta + da) + ',' + (tb + db), left: 1 });
+    else field.tile(L, ta + da, tb + db); // no workers: compute here
+  }
+  if (!ready && workers.length) return [];
+  const seed = field.seed, S = LEVELS[L].size, R = STAMP_RING;
+  const list = [];
+  for (let j = 0; j < TILE; j++) {
+    for (let i = 0; i < TILE; i++) {
+      const a = ta * TILE + i, b = tb * TILE + j;
+      const e = field.value(L, a, b);
+      if (e < 0 || seaWithin(a, b, STAMP_SHORE)) continue; // land only, nothing right by the coast
+      // The ground's shape around the square (see RELIEF_TERRAIN): the ring of squares R
+      // out (all of it, and its west and east sides) and the 8 squares around.
+      let sum = 0, west = 0, east = 0, near = 0;
+      for (let d = -R; d < R; d++) {
+        sum += field.value(L, a + d, b - R) + field.value(L, a + R, b + d)
+          + field.value(L, a - d, b + R) + field.value(L, a - R, b - d);
+      }
+      for (let d = -R; d <= R; d++) { west += field.value(L, a - R, b + d); east += field.value(L, a + R, b + d); }
+      for (let db = -1; db <= 1; db++) for (let da = -1; da <= 1; da++) if (da || db) near += field.value(L, a + da, b + db);
+      const kind = reliefKindFor({
+        e, p: e - sum / (8 * R), dropW: e - west / (2 * R + 1), dropE: e - east / (2 * R + 1), inner: e - near / 8,
+      });
+      if (!kind || hash(seed, a, b, 961) >= STAMP_CHANCE[kind]) continue;
+      if ((kind === 'spire' || kind === 'peak') && seaWithin(a, b, STAMP_COAST)) continue; // no mountains near coasts
+      const pool = stampSet[kind];
+      const [cx, cy] = squareCentre(L, a, b);
+      const shade = Math.max(0, Math.min(STAMP_SHADES - 1, Math.round(e / STAMP_SHADE_M)));
+      // STAMP_PAIR_CHANCE of stamped squares get a second stamp of the same kind (another
+      // variant, its own position and width), overlapping the first.
+      const n = hash(seed, a, b, 966) < STAMP_PAIR_CHANCE ? 2 : 1;
+      const v0 = Math.floor(hash(seed, a, b, 962) * pool.length);
+      for (let k = 0; k < n; k++) {
+        const ch = 10 * k; // separate hash channels for the second stamp
+        list.push({
+          st: pool[(v0 + k * (1 + Math.floor(hash(seed, a, b, 967) * (pool.length - 1)))) % pool.length],
+          x: cx + (hash(seed, a, b, 963 + ch) - 0.5) * 0.6 * S,
+          y: cy + (hash(seed, a, b, 964 + ch) - 0.5) * 0.6 * S + 0.2 * S,
+          miles: STAMP_MILES[kind] * (0.85 + 0.3 * hash(seed, a, b, 965 + ch)),
+          shade,
+        });
+      }
+    }
+  }
+  stampTiles.set(key, { list, complete: true });
+  if (stampTiles.size > 4000) stampTiles.delete(stampTiles.keys().next().value);
+  return list;
+}
+
+// Stamps blend into the terrain under them (see reliefColours and RELIEF_STYLE in
+// mountains.js). Fill colours are matched to the nearest STAMP_SHADE_M of elevation.
+const STAMP_SHADE_M = 100;
+const STAMP_SHADES = 61; // 0 .. 6,000 m
+
+/** Paint stamp st, width size px, anchored at its base centre = current origin. */
+function paintStamp(c, st, size, shade) {
+  const sc = size / 100;
+  const col = reliefColours(shade * STAMP_SHADE_M);
+  c.save();
+  c.scale(sc, sc);
+  c.translate(-50, -100);
+  c.lineJoin = 'round';
+  c.lineCap = 'round';
+  const ink = Math.max(1, Math.min(4, size * 0.025)); // px: thicker for bigger stamps
+  for (const p of stampPaths(st)) {
+    // Each peak is painted opaque first (so nearer peaks hide farther ones), then its lines.
+    c.fillStyle = col.fill; c.fill(p.fill);
+    c.fillStyle = col.shade; c.fill(p.shade);
+    c.strokeStyle = col.ink;
+    c.lineWidth = (ink * 0.55) / sc; c.stroke(p.hatch);
+    c.lineWidth = ink / sc; c.stroke(p.ink);
+  }
+  c.restore();
+}
+
+/**
+ * Render stamp st at width size (css px) into a canvas (a new one, or reuse), with its
+ * base faded out. Returns { canvas, size, w, h, ax, ay } (w, h, anchor ax, ay in css px).
+ */
+function renderStamp(st, size, shade, reuse) {
+  const sc = size / 100;
+  // Box: x -8..108, y from the stamp's top - 4 to 104 (stamp units).
+  const top = Math.floor(st.top) - 4;
+  const w = Math.ceil(116 * sc), h = Math.ceil((104 - top) * sc);
+  const canvas = reuse || document.createElement('canvas');
+  const cw = Math.ceil(w * dpr), ch = Math.ceil(h * dpr);
+  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+  const c = canvas.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.globalCompositeOperation = 'source-over';
+  c.clearRect(0, 0, w, h);
+  const ax = 58 * sc, ay = (100 - top) * sc;
+  c.save();
+  c.translate(ax, ay);
+  paintStamp(c, st, size, shade);
+  c.restore();
+  // Fade the base: erase more and more toward the ground line (and the ticks just below).
+  const fadeTop = ay - RELIEF_STYLE.baseFade * (100 - st.top) * sc;
+  const g = c.createLinearGradient(0, fadeTop, 0, ay);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.9)');
+  c.globalCompositeOperation = 'destination-out';
+  c.fillStyle = g;
+  c.fillRect(0, fadeTop, w, ay - fadeTop);
+  c.fillStyle = 'rgba(0,0,0,0.9)';
+  c.fillRect(0, ay, w, h - ay);
+  c.globalCompositeOperation = 'source-over';
+  return { canvas, size, w, h, ax, ay };
+}
+
+// Small stamps are pre-rendered into bitmaps (sprites) per stamp, size bucket and fill
+// shade, so a frame mostly just copies bitmaps.
+const spriteCache = new Map();
+const bigStampCanvas = document.createElement('canvas');
+
+function stampSprite(st, bucket, shade) {
+  const key = st.id + ':' + bucket + ':' + shade + ':' + dpr;
+  let sp = spriteCache.get(key);
+  if (sp) return sp;
+  sp = renderStamp(st, 1.08 ** bucket, shade);
+  spriteCache.set(key, sp);
+  if (spriteCache.size > 6000) spriteCache.delete(spriteCache.keys().next().value);
+  return sp;
 }
 
 function draw() {
@@ -396,6 +609,9 @@ function draw() {
       for (let b = b0; b <= b1 + 1; b++) { ctx.moveTo(0, edgeY(L, b) + 0.5); ctx.lineTo(cssW, edgeY(L, b) + 0.5); }
       ctx.stroke();
     }
+
+    // Mountain stamps on high ground.
+    if (settings.mountains) drawMountains();
 
     // 3. Bias-square boundaries (10,000 mi and up), on the same half-way lines as square
     //    edges: bias square a holds grid points a*n ... a*n + n - 1 (n = size / GRID).
@@ -762,6 +978,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'p' || e.key === 'P') { togglePlates(); return; }
   if (e.key === 'v' || e.key === 'V') { toggleView(); return; }
   if (e.key === 'n' || e.key === 'N') { toggleWind(); return; }
+  if (e.key === 'm' || e.key === 'M') { toggleMountains(); return; }
   if (e.key === '+' || e.key === '=') zoomAt(1 / 1.5, cssW / 2, cssH / 2);
   else if (e.key === '-' || e.key === '_') zoomAt(1.5, cssW / 2, cssH / 2);
   else keys.add(e.key.toLowerCase());

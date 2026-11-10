@@ -72,7 +72,7 @@
     </fieldset>
     <fieldset>
       <legend>Rendering</legend>
-      <label><input type="radio" name="render" value="smooth" /> Smooth (blend between squares)</label>
+      <label><input type="radio" name="render" value="smooth" /> Smooth (blend near square edges)</label>
       <label><input type="radio" name="render" value="blocky" /> Blocky (flat squares)</label>
     </fieldset>
     <fieldset>
@@ -100,7 +100,12 @@
       <label><input type="radio" name="wind" value="on" /> Shown</label>
       <div class="hint">arrows: wind · H/L: pressure centres · lines: equator, 30°, 60°, pole</div>
     </fieldset>
-    <div class="hint">V view · T wide smoothing · R rendering · L labels · P plates · N wind</div>
+    <fieldset>
+      <legend>Mountains</legend>
+      <label><input type="radio" name="mountains" value="off" /> Hidden</label>
+      <label><input type="radio" name="mountains" value="on" checked /> Shown</label>
+    </fieldset>
+    <div class="hint">V view · T wide smoothing · R rendering · L labels · P plates · N wind · M mountains</div>
   </details>
   <div class="panel">
     <div id="readout">&nbsp;</div>
